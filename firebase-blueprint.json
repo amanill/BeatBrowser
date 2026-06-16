@@ -1,0 +1,42 @@
+{
+  "entities": {
+    "cached_image": {
+      "title": "Cached Image",
+      "description": "Caches Spotify image URLs for artists/tracks to avoid redundant API queries and improve load speed",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Name or Spotify ID of the entity" },
+        "imageUrl": { "type": "string", "description": "The resolved high-conviction image URL" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp of caching" }
+      },
+      "required": ["id", "imageUrl", "createdAt"]
+    },
+    "favorite_map": {
+      "title": "Favorite Map",
+      "description": "A saved constellation map representing a user's favorite song or artist DNA",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "The UID of the user who saved this constellation" },
+        "name": { "type": "string", "description": "Name of the central track or artist" },
+        "artist": { "type": "string", "description": "Artist of the central track (if map type is song, empty for artist map)" },
+        "type": { "type": "string", "enum": ["song", "artist"], "description": "The category of map generated" },
+        "genres": { "type": "array", "description": "List of genres associated with this central node" },
+        "description": { "type": "string", "description": "Explanatory text of the central node style or acoustic metrics" },
+        "metrics": { "type": "object", "description": "Song DNA metrics if applicable" },
+        "nodes": { "type": "array", "description": "Array of connected ConnectionNode or ArtistConnectionNode constellations" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp of save" }
+      },
+      "required": ["userId", "name", "type", "createdAt", "nodes"]
+    }
+  },
+  "firestore": {
+    "/cached_images/{imageId}": {
+      "schema": "cached_image",
+      "description": "Globally shared collection of cached artist and track images"
+    },
+    "/users/{userId}/favorites/{favoriteId}": {
+      "schema": "favorite_map",
+      "description": "Strictly sub-collected personal favorite music maps for each user"
+    }
+  }
+}

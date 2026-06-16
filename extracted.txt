@@ -1,0 +1,546 @@
+  const renderConstellationMap = (isFullscreen: boolean) => {
+    return (
+      <div className={`${
+        isFullscreen 
+          ? "fixed inset-0 z-50 p-6 md:p-8 flex flex-col justify-between bg-[#0b0b0c] min-h-screen w-screen h-screen overflow-hidden" 
+          : `col-span-12 ${isMapExpanded ? "md:col-span-12 order-1 min-h-[640px]" : "md:col-span-7 order-2 min-h-[500px]"} bg-[#141416] rounded-3xl border border-white/5 p-5 md:p-6 shadow-2xl flex flex-col justify-between transition-all duration-300 relative overflow-hidden`
+      }`}>
+        
+        {/* Title Header area */}
+        <div>
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between border-b border-white/5 pb-3 mb-4 gap-3">
+            <div className="flex items-center space-x-2 animate-fade-in">
+              <Compass className="w-4 h-4 text-emerald-400 animate-spin" style={{ animationDuration: "12s" }} />
+              <span className="text-xs font-bold uppercase tracking-wider text-white">
+                {activeMapType === "artist" ? `${artistDNA?.name}'s Artist Music Map` : "Interactive Discovery Music-Constellation Map"}
+              </span>
+              {(isMapExpanded || isFullscreenMap) && (
+                <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded-md font-mono border border-emerald-500/20 uppercase tracking-wider animate-pulse ml-2">
+                  {isFullscreenMap ? "Fullscreen Space" : "Expanded Map"}
+                </span>
+              )}
+            </div>
+            
+            {/* Interactive Scale, Zoom & Layout controls */}
+            <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+              
+              {/* Map Engine Type Label */}
+              <div className="flex items-center bg-[#050505] px-2.5 py-1 rounded-lg border border-white/5 font-mono text-[9px] text-slate-400 mr-1 shadow-inner">
+                <span className="text-slate-500 font-mono text-[8px] uppercase tracking-wider mr-1.5">ENGINE:</span>
+                <span className="text-emerald-400 font-extrabold uppercase">Gemini Cognitive Model</span>
+              </div>
+
+              {/* Stars custom density selector */}
+              <div className="flex items-center space-x-1 bg-[#050505] p-1 rounded-lg border border-white/5 font-mono text-[9px] text-slate-400 mr-1 shadow-inner">
+                <span className="px-1 text-slate-500 font-mono text-[8px] uppercase tracking-wider">STARS:</span>
+                {[20, 35, 50].map((size) => {
+                  const isActive = constellationSize === size;
+                  return (
+                    <button
+                      key={size}
+                      onClick={async () => {
+                        setConstellationSize(size);
+                        if (activeMapType === "artist" && artistDNA) {
+                          await generateArtistDNA(artistDNA.name, size);
+                        } else if (selectedTrack) {
+                          await generateSongDNA(selectedTrack, size);
+                        }
+                      }}
+                      disabled={isDNALoading || isArtistDNALoading}
+                      className={`px-1.5 py-0.5 rounded transition-all cursor-pointer ${
+                        isActive 
+                          ? "bg-emerald-500 text-black font-extrabold" 
+                          : "hover:bg-white/5 hover:text-white"
+                      } disabled:opacity-45 disabled:cursor-not-allowed`}
+                      title={`Map ${size} discovery stars`}
+                    >
+                      {size}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Popularity/Familiarity Level Filter Selector */}
+              <div className="flex items-center space-x-1 bg-[#050505] p-1 rounded-lg border border-white/5 font-mono text-[9px] text-slate-400 mr-1 shadow-inner">
+                <span className="px-1 text-slate-500 font-mono text-[8px] uppercase tracking-wider">FAMILIARITY:</span>
+                {(["all", "familiar", "mainstream"] as const).map((level) => {
+                  const isActive = familiarityLevel === level;
+                  const label = level === "all" ? "All" : level === "familiar" ? "Established" : "Superstars";
+                  const tooltip = level === "all" 
+                    ? "Show all underground & mainstream recommendations" 
+                    : level === "familiar" 
+                    ? "Filter out obscure indies (Popularity 60+)" 
+                    : "Only show highly recognized superstars (Popularity 80+)";
+                  return (
+                    <button
+                      key={level}
+                      onClick={() => setFamiliarityLevel(level)}
+                      className={`px-1.5 py-0.5 rounded transition-all cursor-pointer ${
+                        isActive 
+                          ? "bg-emerald-500 text-black font-extrabold" 
+                          : "hover:bg-white/5 hover:text-white"
+                      }`}
+                      title={tooltip}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Zoom controls */}
+              <div className="flex items-center space-x-1 bg-[#050505] p-1 rounded-lg border border-white/5 font-mono text-[9px] text-slate-400 mr-1 shadow-inner">
+                <span className="px-1 text-slate-500 font-mono text-[8px] uppercase tracking-wider">ZOOM:</span>
+                <button
+                  onClick={() => setMapZoom(prev => Math.min(prev + 0.15, 2.2))}
+                  className="px-1.5 py-0.5 rounded hover:bg-white/5 hover:text-white transition-all cursor-pointer font-bold text-xs"
+                  title="Zoom In Content Grid"
+                >
+                  +
+                </button>
+                <button
+                  onClick={() => setMapZoom(prev => Math.max(prev - 0.15, 0.4))}
+                  className="px-1.5 py-0.5 rounded hover:bg-white/5 hover:text-white transition-all cursor-pointer font-bold text-xs"
+                  title="Zoom Out Content Grid"
+                >
+                  -
+                </button>
+                <button
+                  onClick={() => {
+                    setMapZoom(1.0);
+                    setMapOffset({ x: 0, y: 0 });
+                  }}
+                  className="p-1 rounded hover:bg-white/5 hover:text-white transition-all cursor-pointer text-slate-500 hover:text-emerald-400 mr-0.5"
+                  title="Reset Zoom & Pan Offset"
+                >
+                  <RotateCcw className="w-2.5 h-2.5" />
+                </button>
+              </div>
+
+              <div className="h-4 w-[1px] bg-white/10 mx-1" />
+
+              {/* Full Screen Toggle and Maximize inline button */}
+              <button
+                onClick={() => setIsFullscreenMap(prev => !prev)}
+                className="p-1.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 hover:text-white transition-all flex items-center justify-center cursor-pointer mr-0.5"
+                title={isFullscreenMap ? "Exit Fullscreen" : "Maximize Fullscreen View"}
+              >
+                {isFullscreenMap ? (
+                  <Minimize2 className="w-3.5 h-3.5" />
+                ) : (
+                  <Maximize2 className="w-3.5 h-3.5" />
+                )}
+              </button>
+
+              {!isFullscreenMap && (
+                <button
+                  onClick={() => setIsMapExpanded(prev => !prev)}
+                  className="p-1.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 hover:text-white transition-all flex items-center justify-center cursor-pointer"
+                  title={isMapExpanded ? "Collapse View Layout" : "Maximize Map Layout"}
+                >
+                  {isMapExpanded ? (
+                    <Layers className="w-3.5 h-3.5 text-emerald-500" />
+                  ) : (
+                    <Layers className="w-3.5 h-3.5 opacity-60" />
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+          <p className="text-[10px] text-slate-500 leading-normal mb-2 uppercase tracking-tight font-mono">
+            Click on orbiting stars on the cosmic map to evaluate their relationship to the central core. Hover points to identify elements.
+          </p>
+        </div>
+
+        {/* The actual 2D coordinates visual galaxy canvas */}
+        <div 
+          ref={setCanvasRef}
+          onMouseDown={handleMapMouseDown}
+          onMouseMove={handleMapMouseMove}
+          onMouseUp={handleMapMouseUpOrLeave}
+          onMouseLeave={handleMapMouseUpOrLeave}
+          className={`bg-[#050505] rounded-2xl border border-white/5 w-full relative overflow-hidden flex-1 flex items-center justify-center my-2 select-none transition-all duration-300 ${
+            isFullscreen ? "h-[68vh] md:h-[72vh] flex-1" : isMapExpanded ? "h-[500px]" : "h-[360px]"
+          } cursor-${isDraggingMap ? 'grabbing' : 'grab'}`} 
+          id="music_constellation_canvas"
+        >
+          
+          {/* Compass/Grid background design (panning with backgroundPosition) */}
+          <div 
+            className="absolute inset-0 opacity-[0.12]"
+            style={{
+              backgroundImage: "radial-gradient(rgba(16, 185, 129, 0.2) 1px, transparent 1px)",
+              backgroundSize: "24px 24px",
+              backgroundPosition: `${mapOffset.x}px ${mapOffset.y}px`
+            }}
+          />
+          
+          {/* Axis Label decorators depending on Active Map Type */}
+          {activeMapType === "artist" ? (
+            <>
+              <span className="absolute top-[8px] left-[50%] -translate-x-1/2 text-[8px] font-mono tracking-widest text-emerald-400 font-bold uppercase z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Experimental / Avant-Garde</span>
+              <span className="absolute bottom-[8px] left-[50%] -translate-x-1/2 text-[8px] font-mono tracking-widest text-[#a855f7] font-bold uppercase z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Traditional / Stylistic</span>
+              <span className="absolute right-[8px] top-[50%] -translate-y-1/2 text-[8px] font-mono tracking-widest text-emerald-500 font-bold uppercase rotate-90 origin-right z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Intense / High-Energy</span>
+              <span className="absolute left-[8px] top-[50%] -translate-y-1/2 text-[8px] font-mono tracking-widest text-emerald-500 font-bold uppercase -rotate-90 origin-left z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Subtle / Ambient</span>
+            </>
+          ) : (
+            <>
+              <span className="absolute top-[8px] left-[50%] -translate-x-1/2 text-[8px] font-mono tracking-widest text-emerald-400 font-bold uppercase z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Happy (+Valence)</span>
+              <span className="absolute bottom-[8px] left-[50%] -translate-x-1/2 text-[8px] font-mono tracking-widest text-[#a855f7] font-bold uppercase z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Somber (-Valence)</span>
+              <span className="absolute right-[8px] top-[50%] -translate-y-1/2 text-[8px] font-mono tracking-widest text-emerald-500 font-bold uppercase rotate-90 origin-right z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Energetic (+Energy)</span>
+              <span className="absolute left-[8px] top-[50%] -translate-y-1/2 text-[8px] font-mono tracking-widest text-emerald-500 font-bold uppercase -rotate-90 origin-left z-10 bg-[#050505]/60 px-2 py-0.5 rounded border border-white/5">Mellow (-Energy)</span>
+            </>
+          )}
+
+          {/* Map Contents panning viewport */}
+          <div 
+            className="absolute inset-0 w-full h-full pointer-events-none"
+            style={{ 
+              transform: `translate(${mapOffset.x}px, ${mapOffset.y}px) scale(${mapZoom})`,
+              transformOrigin: '50% 50%'
+            }}
+          >
+            {/* Center Cross wires */}
+            <div className="absolute left-[50%] inset-y-8 border-l border-white/5 border-dashed pointer-events-none" />
+            <div className="absolute top-[50%] inset-x-8 border-t border-white/5 border-dashed pointer-events-none" />
+
+            {/* Line Render of Connection Vectors overlay */}
+            <svg className="absolute inset-0 w-full h-full pointer-events-none">
+              {activeMapType === "artist" && artistDNA ? (
+                filteredSimilarArtists.map((node, index) => {
+                  const x2 = 50 + (node.x / 2.3);
+                  const y2 = 50 - (node.y / 2.3);
+                  const isHighlighted = selectedArtistConstellationNode?.id === node.id;
+                  return (
+                    <line
+                      key={`${node.id}-${index}`}
+                      x1="50%"
+                      y1="50%"
+                      x2={`${x2}%`}
+                      y2={`${y2}%`}
+                      stroke={isHighlighted ? "rgba(16, 185, 129, 0.7)" : "rgba(255, 255, 255, 0.08)"}
+                      strokeWidth={isHighlighted ? "2" : "1"}
+                      strokeDasharray={isHighlighted ? "3 3" : "4 4"}
+                      className="transition-all duration-350"
+                    />
+                  );
+                })
+              ) : songDNA ? (
+                filteredSimilarTracks.map((node) => {
+                  const x2 = 50 + (node.x / 2.3);
+                  const y2 = 50 - (node.y / 2.3);
+                  const isHighlighted = selectedConstellationNode?.id === node.id;
+                  return (
+                    <line
+                      key={node.id}
+                      x1="50%"
+                      y1="50%"
+                      x2={`${x2}%`}
+                      y2={`${y2}%`}
+                      stroke={isHighlighted ? "rgba(16, 185, 129, 0.7)" : "rgba(255, 255, 255, 0.08)"}
+                      strokeWidth={isHighlighted ? "2" : "1"}
+                      strokeDasharray={isHighlighted ? "3 3" : "4 4"}
+                      className="transition-all duration-350"
+                    />
+                  );
+                })
+              ) : null}
+            </svg>
+
+            {/* Original Central Node star */}
+            <div className="absolute left-[50%] top-[49.8%] -translate-x-1/2 -translate-y-1/2 z-20 flex flex-col items-center pointer-events-auto">
+              <div className="w-10 h-10 rounded-full bg-emerald-500 flex items-center justify-center border-4 border-[#050505] group cursor-pointer shadow-[0_0_20px_rgba(16,185,129,0.6)] hover:scale-110 transition-all overflow-hidden">
+                {activeMapType === "artist" ? (
+                  <User className="w-4 h-4 text-black font-extrabold" />
+                ) : (
+                  selectedTrack?.album?.images?.[1]?.url || selectedTrack?.album?.images?.[0]?.url ? (
+                    <img
+                      src={selectedTrack?.album?.images?.[1]?.url || selectedTrack?.album?.images?.[0]?.url}
+                      alt={selectedTrack?.name}
+                      className="w-full h-full object-cover"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <Disc className="w-4 h-4 text-black animate-spin" />
+                  )
+                )}
+              </div>
+              <div className="mt-1 px-1.5 py-0.5 rounded bg-emerald-500 text-black font-mono font-extrabold text-[8px] uppercase tracking-wider text-center max-w-[90px] truncate shadow border border-emerald-400">
+                {activeMapType === "artist" ? artistDNA?.name : selectedTrack?.name}
+              </div>
+            </div>
+
+            {/* Connected Stars Nodes orbiting coordinates */}
+            {activeMapType === "artist" && artistDNA ? (
+              filteredSimilarArtists.map((node, index) => {
+                const isHighlighted = selectedArtistConstellationNode?.id === node.id;
+                const leftPct = 50 + (node.x / 2.3);
+                const topPct = 50 - (node.y / 2.3);
+
+                return (
+                  <div
+                    key={`${node.id}-${index}`}
+                    className="absolute -translate-x-1/2 -translate-y-1/2 z-30 transition-all duration-300 group flex flex-col items-center pointer-events-auto"
+                    style={{ left: `${leftPct}%`, top: `${topPct}%` }}
+                  >
+                    <button
+                      onClick={() => setSelectedArtistConstellationNode(node)}
+                      className={`w-9 h-9 rounded-full border-2 overflow-hidden flex items-center justify-center cursor-pointer transition-all hover:scale-130 hover:shadow-[0_0_15px_rgba(16,185,129,0.5)] ${
+                        isHighlighted 
+                          ? "bg-emerald-500 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]" 
+                          : "bg-[#161618] border-white/10"
+                      }`}
+                      title={node.name}
+                    >
+                      <SafeImage
+                        src={node.imageUrl}
+                        alt={node.name}
+                        className="w-full h-full object-cover"
+                      />
+                    </button>
+                    
+                    {/* Under-node Label */}
+                    <span className={`text-[8.5px] font-mono mt-1 px-1.5 py-0.5 rounded leading-none max-w-[90px] truncate text-center transition-all bg-black/80 pointer-events-none border ${
+                      isHighlighted
+                        ? "text-emerald-400 font-bold border-emerald-500/30 bg-black"
+                        : "text-slate-400 border-transparent group-hover:text-white group-hover:border-white/10"
+                    }`}>
+                      {node.name}
+                    </span>
+                    
+                    {/* Short Floating name badge indicator */}
+                    <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-black/90 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-50 pointer-events-none shadow-xl min-w-[124px] text-center">
+                      <p className="text-[9px] text-emerald-400 font-bold font-mono truncate mr-0.5 leading-tight">{node.name}</p>
+                      <p className="text-[7.5px] text-slate-400 font-light truncate leading-none mt-0.5">{node.category}</p>
+                      <div className="text-[7px] text-slate-500 font-mono mt-1 pt-0.5 border-t border-white/5 flex justify-between uppercase">
+                        <span>Similarity</span>
+                        <span className="font-bold text-slate-300">{node.similarityScore}%</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            ) : songDNA ? (
+              filteredSimilarTracks.map((node) => {
+                const isHighlighted = selectedConstellationNode?.id === node.id;
+                const leftPct = 50 + (node.x / 2.3);
+                const topPct = 50 - (node.y / 2.3);
+
+                return (
+                  <div
+                    key={node.id}
+                    className="absolute -translate-x-1/2 -translate-y-1/2 z-30 transition-all duration-300 group flex flex-col items-center pointer-events-auto"
+                    style={{ left: `${leftPct}%`, top: `${topPct}%` }}
+                  >
+                    <button
+                      onClick={() => setSelectedConstellationNode(node)}
+                      className={`w-9 h-9 rounded-full border-2 overflow-hidden flex items-center justify-center cursor-pointer transition-all hover:scale-130 hover:shadow-[0_0_15px_rgba(16,185,129,0.5)] ${
+                        isHighlighted 
+                          ? "bg-emerald-500 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]" 
+                          : "bg-[#161618] border-white/10"
+                      }`}
+                      title={`${node.title} - ${node.artist}`}
+                    >
+                      <SafeImage
+                        src={node.imageUrl}
+                        alt={node.title}
+                        className="w-full h-full object-cover"
+                      />
+                    </button>
+                    
+                    {/* Under-node Label */}
+                    <span className={`text-[8.5px] font-mono mt-1 px-1.5 py-0.5 rounded leading-none max-w-[90px] truncate text-center transition-all bg-black/80 pointer-events-none border ${
+                      isHighlighted
+                        ? "text-emerald-400 font-bold border-emerald-500/30 bg-black"
+                        : "text-slate-400 border-transparent group-hover:text-white group-hover:border-white/10"
+                    }`}>
+                      {node.title}
+                    </span>
+                    
+                    {/* Short Floating name badge indicator */}
+                    <div className="absolute top-12 left-1/2 -translate-x-1/2 bg-black/90 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity duration-200 z-50 pointer-events-none shadow-xl min-w-[120px] text-center">
+                      <p className="text-[9px] text-emerald-400 font-bold font-mono truncate mr-0.5 leading-tight">{node.title}</p>
+                      <p className="text-[7.5px] text-slate-400 font-light truncate leading-none mt-0.5">by {node.artist}</p>
+                      <div className="text-[7px] text-slate-500 font-mono mt-1 pt-0.5 border-t border-white/5 flex justify-between uppercase">
+                        <span>Similarity</span>
+                        <span className="font-bold text-slate-300">{node.similarityScore}%</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            ) : null}
+          </div>
+
+        </div>
+
+        {/* Connection details readout area card */}
+        {activeMapType === "artist" && selectedArtistConstellationNode ? (
+          <div className="bg-[#161618] border border-white/5 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mt-1 transition-all">
+            <div className="space-y-1 min-w-0 flex-1">
+              <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-full border border-emerald-500/10 font-mono uppercase tracking-widest">
+                {selectedArtistConstellationNode.category}
+              </span>
+              <h4 className="text-sm font-bold text-white truncate leading-tight mt-1">{selectedArtistConstellationNode.name}</h4>
+              <div className="flex items-center space-x-2 mt-0.5">
+                <span className="text-[10px] text-slate-400 font-mono">Affinity Network Axis</span>
+                <span className="h-1 w-1 bg-white/10 rounded-full" />
+                <button
+                  onClick={() => {
+                    setSelectedTrack({
+                      id: "",
+                      name: "",
+                      artists: [{ name: selectedArtistConstellationNode.name }],
+                      album: { images: [] },
+                      preview_url: null,
+                      external_urls: { spotify: "" }
+                    } as any);
+                    generateArtistDNA(selectedArtistConstellationNode.name);
+                  }}
+                  className="text-[10px] text-emerald-400 hover:text-emerald-300 hover:underline font-mono uppercase font-bold cursor-pointer"
+                  title={`Examine ${selectedArtistConstellationNode.name}'s music map`}
+                >
+                  [View Artist Map Directly]
+                </button>
+              </div>
+
+              {selectedArtistConstellationNode.musicBrainzId && (
+                <div className="flex items-center space-x-2 mt-1.5 bg-emerald-500/5 border border-emerald-500/10 rounded-lg px-2 py-0.5 max-w-fit">
+                  <span className="text-[8px] font-extrabold text-emerald-400 font-mono uppercase tracking-wider">
+                    Wikidata Mapped
+                  </span>
+                  <span className="h-1 w-1 bg-emerald-400 rounded-full" />
+                  <a
+                    href={`https://musicbrainz.org/artist/${selectedArtistConstellationNode.musicBrainzId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[9px] text-[#2dd4bf] hover:text-[#5eead4] font-mono flex items-center space-x-1 hover:underline cursor-pointer font-bold lowercase"
+                    title={`View ${selectedArtistConstellationNode.name} on MusicBrainz`}
+                  >
+                    <span>mbid: {selectedArtistConstellationNode.musicBrainzId.substring(0, 8)}...</span>
+                    <span className="text-[8px]">↗</span>
+                  </a>
+                </div>
+              )}
+              
+              <p className="text-xs text-slate-300 leading-normal font-sans font-light mt-2 bg-[#050505]/30 p-2.5 rounded-xl border border-white/5">
+                {selectedArtistConstellationNode.explanation}
+              </p>
+            </div>
+
+            <div className="flex-shrink-0 flex sm:flex-col items-end gap-3 self-stretch sm:self-center justify-between sm:justify-center">
+              <div className="text-right leading-none">
+                <span className="text-[10px] text-slate-500 font-mono">SIMILARITY</span>
+                <p className="text-lg font-bold font-mono text-emerald-400 mt-0.5">{selectedArtistConstellationNode.similarityScore}%</p>
+              </div>
+              
+              <button
+                onClick={() => {
+                  loadDiscography(selectedArtistConstellationNode.name);
+                }}
+                className="flex items-center justify-center space-x-1.5 bg-emerald-500/10 hover:bg-emerald-500/25 text-emerald-400 font-bold text-[10px] uppercase tracking-wider py-2.5 px-4 rounded-full border border-emerald-500/20 transition-all cursor-pointer shadow-sm"
+              >
+                <Disc className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "8s" }} />
+                <span>See Discography</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  generateArtistDNA(selectedArtistConstellationNode.name);
+                }}
+                className="flex items-center space-x-1 bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-[10px] uppercase tracking-wider py-2.5 px-4 rounded-full transition-all shadow-lg shadow-[#10b981]/15 cursor-pointer"
+              >
+                <span>Model Artist</span>
+                <ChevronRight className="w-3.5 h-3.5 stroke-[2.5px]" />
+              </button>
+            </div>
+          </div>
+        ) : activeMapType !== "artist" && selectedConstellationNode ? (
+          <div className="bg-[#161618] border border-white/5 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mt-1 transition-all">
+            <div className="space-y-1 min-w-0 flex-1">
+              <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-2.5 py-1 rounded-full border border-emerald-500/10 font-mono uppercase tracking-widest">
+                {selectedConstellationNode.category}
+              </span>
+              <h4 className="text-sm font-bold text-white truncate leading-tight mt-1">{selectedConstellationNode.title}</h4>
+              <p className="text-xs text-slate-400 font-sans mt-1">
+                By{" "}
+                {selectedConstellationNode.artist ? (
+                  selectedConstellationNode.artist.split(/(?:,\s*|&)/).map((artistName, index, arr) => {
+                    const trimmedName = artistName.trim();
+                    if (!trimmedName) return null;
+                    return (
+                      <span key={index}>
+                        <button
+                          onClick={() => {
+                            setSelectedTrack({
+                              id: "",
+                              name: "",
+                              artists: [{ id: `virt_${index}`, name: trimmedName }],
+                              album: { images: [] },
+                              preview_url: null,
+                              external_urls: { spotify: "" }
+                            } as any);
+                            generateArtistDNA(trimmedName);
+                          }}
+                          className="text-emerald-400 hover:text-emerald-300 hover:underline font-bold transition-all cursor-pointer inline"
+                          title={`Explore ${trimmedName}'s Music Map`}
+                        >
+                          {trimmedName}
+                        </button>
+                        {index < arr.length - 1 && <span className="text-slate-500 mx-1.5">&</span>}
+                      </span>
+                    );
+                  })
+                ) : (
+                  "Unknown Artist"
+                )}
+              </p>
+
+              {selectedConstellationNode.musicBrainzReleaseId && (
+                <div className="flex items-center space-x-2 mt-1.5 bg-emerald-500/5 border border-emerald-500/10 rounded-lg px-2 py-0.5 max-w-fit">
+                  <span className="text-[8px] font-extrabold text-emerald-400 font-mono uppercase tracking-wider">
+                    Wikidata Mapped
+                  </span>
+                  <span className="h-1 w-1 bg-emerald-400 rounded-full" />
+                  <a
+                    href={`https://musicbrainz.org/release-group/${selectedConstellationNode.musicBrainzReleaseId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[9px] text-[#2dd4bf] hover:text-[#5eead4] font-mono flex items-center space-x-1 hover:underline cursor-pointer font-bold lowercase"
+                    title={`View this release group on MusicBrainz`}
+                  >
+                    <span>mbid (release-group): {selectedConstellationNode.musicBrainzReleaseId.substring(0, 8)}...</span>
+                    <span className="text-[8px]">↗</span>
+                  </a>
+                </div>
+              )}
+              
+              <p className="text-xs text-slate-300 leading-normal font-sans font-light mt-2 bg-[#050505]/30 p-2.5 rounded-xl border border-white/5">
+                {selectedConstellationNode.explanation}
+              </p>
+            </div>
+
+            <div className="flex-shrink-0 flex sm:flex-col items-end gap-3 self-stretch sm:self-center justify-between sm:justify-center">
+              <div className="text-right leading-none">
+                <span className="text-[10px] text-slate-500 font-mono">SIMILARITY</span>
+                <p className="text-lg font-bold font-mono text-emerald-400 mt-0.5">{selectedConstellationNode.similarityScore}%</p>
+              </div>
+              
+              <button
+                onClick={() => traverseToRecommendation(selectedConstellationNode)}
+                className="flex items-center space-x-1 bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-[10px] uppercase tracking-wider py-2.5 px-4 rounded-full transition-all shadow-lg shadow-[#10b981]/15 cursor-pointer"
+              >
+                <span>Model Node</span>
+                <ChevronRight className="w-3.5 h-3.5 stroke-[2.5px]" />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="text-center p-6 border border-white/5 rounded-2xl border-dashed">
+            <p className="text-xs text-slate-500 font-mono uppercase tracking-tight">Highlight a constellation star node above to display evaluation relationship data.</p>
+          </div>
+        )}
+
+      </div>
+    );
+  };

@@ -1,0 +1,10 @@
+{
+  "projectId": "personalmusicmapper",
+  "appId": "1:279156781104:web:31c3e640614eb7e32c7df5",
+  "apiKey": "AIzaSyDfH4SjnTPOqgrkq25id5U216rdRhE8hv8",
+  "authDomain": "personalmusicmapper.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "personalmusicmapper.firebasestorage.app",
+  "messagingSenderId": "279156781104",
+  "measurementId": "G-2WDH8ER0TS"
+}

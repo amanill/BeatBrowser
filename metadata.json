@@ -1,0 +1,6 @@
+{
+  "name": "Sonic Constellations & Music Map",
+  "description": "Explore deep musicological connections and dynamic 2D sonic vectors with server-side Gemini. Instantly search any artist or track, and upload your official Spotify JSON streaming history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
