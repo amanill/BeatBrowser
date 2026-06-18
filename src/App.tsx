@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { 
   Music, 
   Disc, 
@@ -26,7 +26,8 @@ import {
   X,
   UploadCloud,
   Award,
-  Trash2
+  Trash2,
+  History
 } from "lucide-react";
 import { SpotifyTrack, SpotifyProfile, SongDNA, ConnectionNode, ArtistDNA, ArtistConnectionNode, ArtistDiscography } from "./types";
 import { ConstellationMap } from './components/ConstellationMap';
@@ -80,6 +81,13 @@ export default function App() {
   const [topRange, setTopRange] = useState<"short_term" | "medium_term" | "long_term">("medium_term");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SpotifyTrack[]>([]);
+  const [recentSearches, setRecentSearches] = useState<{name: string, artist?: string, id: string, image?: string, isArtist?: boolean}[]>(() => {
+    const saved = localStorage.getItem("beat_browser_recent_searches") || localStorage.getItem("sonic_dna_recent_searches");
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) { return []; }
+    }
+    return [];
+  });
   const [activeTab, setActiveTab] = useState<"search" | "favorites" | "streaming_history">("search");
 
   // Local offline-first states (replacing Firebase collection)
@@ -189,6 +197,7 @@ export default function App() {
   const [mapEngine, setMapEngine] = useState<"gemini" | "spotify">("gemini");
   const [constellationSizeAI, setConstellationSizeAI] = useState<number>(20);
   const [constellationSizeAPI, setConstellationSizeAPI] = useState<number>(20);
+  const constellationSize = mapEngine === "gemini" ? constellationSizeAI : constellationSizeAPI;
 
   // Artist Map & Fullscreen states
   const [activeMapType, setActiveMapType] = useState<"song" | "artist">("song");
@@ -219,6 +228,154 @@ export default function App() {
   // Familiarity Level Filter state: "all", "familiar" (popularity >= 60), "mainstream" (popularity >= 80)
   const [familiarityLevel, setFamiliarityLevel] = useState<"all" | "familiar" | "mainstream">("all");
 
+  // Discovery Mode: "curiosity" (prioritizes unplayed/discovery recommendations) or "nostalgia" (prioritizes previously listened track history)
+  const [discoveryMode, setDiscoveryMode] = useState<"curiosity" | "nostalgia">("curiosity");
+
+  // Artist discography drawer states
+  const [isDiscographyOpen, setIsDiscographyOpen] = useState(false);
+  const [activeDiscography, setActiveDiscography] = useState<ArtistDiscography | null>(null);
+  const [isDiscographyLoading, setIsDiscographyLoading] = useState(false);
+  const [discographyError, setDiscographyError] = useState<string | null>(null);
+
+  // IndexedDB Helper
+  const openDB = (): Promise<IDBDatabase> => {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open("SonicDNA_DB", 1);
+      request.onupgradeneeded = (e: any) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains("history")) {
+          db.createObjectStore("history");
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  };
+
+  // Streaming History State Engine
+  const [streamingData, setStreamingData] = useState<{
+    raw: any[];
+    minDate: Date | null;
+    maxDate: Date | null;
+    totalPlays: number;
+    loadedFilesCount: number;
+  } | null>(null);
+
+  useEffect(() => {
+    const hydrate = async () => {
+      try {
+        const db = await openDB();
+        const tx = db.transaction("history", "readonly");
+        const store = tx.objectStore("history");
+        const request = store.get("streaming_summary");
+        
+        request.onsuccess = () => {
+          if (request.result) {
+            const parsed = request.result;
+            setStreamingData({
+              raw: parsed.raw || [],
+              minDate: parsed.minDate ? new Date(parsed.minDate) : null,
+              maxDate: parsed.maxDate ? new Date(parsed.maxDate) : null,
+              totalPlays: parsed.totalPlays || 0,
+              loadedFilesCount: parsed.loadedFilesCount || 0
+            });
+          } else {
+             const cached = localStorage.getItem("spotify_streaming_summary_v1");
+             if (cached) {
+               try {
+                 const parsed = JSON.parse(cached);
+                 setStreamingData({
+                   raw: parsed.raw || [],
+                   minDate: parsed.minDate ? new Date(parsed.minDate) : null,
+                   maxDate: parsed.maxDate ? new Date(parsed.maxDate) : null,
+                   totalPlays: parsed.totalPlays || 0,
+                   loadedFilesCount: parsed.loadedFilesCount || 0
+                 });
+               } catch (e) {}
+             }
+          }
+        };
+      } catch (err) {
+        console.warn("Failed to read IndexedDB", err);
+      }
+    };
+    hydrate();
+  }, []);
+
+  const [isParsingStreaming, setIsParsingStreaming] = useState(false);
+  const [streamingParseError, setStreamingParseError] = useState<string | null>(null);
+  const [streamingFilesCount, setStreamingFilesCount] = useState(0);
+
+  // Filters within streaming history tab
+  const [streamingRange, setStreamingRange] = useState<"all_time" | "last_6_months" | "last_month">("all_time");
+  const [streamingCategory, setStreamingCategory] = useState<"tracks" | "artists" | "albums">("tracks");
+  const [streamingSearch, setStreamingSearch] = useState("");
+
+  const saveStreamingDataWithQuotaGuard = async (data: {
+    raw: any[];
+    minDate: Date | null;
+    maxDate: Date | null;
+    totalPlays: number;
+    loadedFilesCount: number;
+  } | null) => {
+    setStreamingData(data);
+    
+    try {
+      const db = await openDB();
+      const tx = db.transaction("history", "readwrite");
+      if (!data) {
+        tx.objectStore("history").delete("streaming_summary");
+        localStorage.removeItem("spotify_streaming_summary_v1");
+      } else {
+        const summaryString = {
+          raw: data.raw,
+          minDate: data.minDate?.toISOString() || null,
+          maxDate: data.maxDate?.toISOString() || null,
+          totalPlays: data.totalPlays,
+          loadedFilesCount: data.loadedFilesCount
+        };
+        tx.objectStore("history").put(summaryString, "streaming_summary");
+      }
+    } catch (e) {
+      console.warn("Storage quota exceeded. History cached in-memory only.", e);
+    }
+  };
+
+  const formatPlaytime = (ms: number): string => {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+
+    if (hours > 0) {
+      const remMin = minutes % 60;
+      return `${hours}h ${remMin}m`;
+    }
+    if (minutes > 0) {
+      return `${minutes}m`;
+    }
+    return `${seconds}s`;
+  };
+
+
+  const listenedTracksSet = useMemo(() => {
+    if (!streamingData || !streamingData.raw) return new Set<string>();
+    const set = new Set<string>();
+    streamingData.raw.forEach(item => {
+      const track = (item.trackName || item.master_metadata_track_name || "").toLowerCase().trim();
+      const artist = (item.artistName || item.master_metadata_album_artist_name || "").toLowerCase().trim();
+      if (track && artist) {
+        set.add(`${track} ||| ${artist}`);
+      }
+    });
+    return set;
+  }, [streamingData]);
+
+  const isTrackListened = useCallback((title: string, artist: string) => {
+    const tClean = title.toLowerCase().trim();
+    const aClean = artist.toLowerCase().trim();
+    return listenedTracksSet.has(`${tClean} ||| ${aClean}`);
+  }, [listenedTracksSet]);
+
   const filteredSimilarArtists = useMemo(() => {
     if (!artistDNA || !artistDNA.similarArtists) return [];
     if (familiarityLevel === "all") return artistDNA.similarArtists;
@@ -228,10 +385,58 @@ export default function App() {
 
   const filteredSimilarTracks = useMemo(() => {
     if (!songDNA || !songDNA.similarTracks) return [];
-    if (familiarityLevel === "all") return songDNA.similarTracks;
-    const minPopularity = familiarityLevel === "familiar" ? 60 : 80;
-    return songDNA.similarTracks.filter(item => (item.popularity ?? 75) >= minPopularity);
-  }, [songDNA, familiarityLevel]);
+    
+    // 1. Tag each track with isListened status
+    const baseTracks = songDNA.similarTracks.map(item => {
+      const isListened = isTrackListened(item.title, item.artist);
+      return { ...item, isListened };
+    });
+
+    // 2. Familiarity filter
+    let filteredBase = baseTracks;
+    if (familiarityLevel !== "all") {
+      const minPopularity = familiarityLevel === "familiar" ? 60 : 80;
+      filteredBase = baseTracks.filter(item => (item.popularity ?? 75) >= minPopularity);
+    }
+
+    // 3. Separate into undiscovered and listenedCandidates (played history)
+    const undiscovered = filteredBase.filter(item => !item.isListened);
+    const listenedCandidates = filteredBase.filter(item => item.isListened);
+
+    // 4. Prioritize according to Discovery Mode and active constellationSize
+    const limitSize = constellationSize;
+    let selected: typeof filteredBase = [];
+
+    if (discoveryMode === "curiosity") {
+      // Curiosity prioritizes discovery: unplayed first, fallback to listened
+      selected = undiscovered.slice(0, limitSize);
+      if (selected.length < limitSize) {
+        const needed = limitSize - selected.length;
+        selected = [...selected, ...listenedCandidates.slice(0, needed)];
+      }
+    } else {
+      // Nostalgia prioritizes played history: listened first, fallback to unplayed
+      selected = listenedCandidates.slice(0, limitSize);
+      if (selected.length < limitSize) {
+        const needed = limitSize - selected.length;
+        selected = [...selected, ...undiscovered.slice(0, needed)];
+      }
+    }
+
+    // 5. Re-assign beautiful Concentric Galactic Spiral coordinates
+    const positioned = selected.map((item, idx) => {
+      const angle = idx * 2.3;
+      const radius = 22 + idx * 2.5;
+      return {
+        ...item,
+        x: Math.round(Math.cos(angle) * radius),
+        y: Math.round(Math.sin(angle) * radius)
+      };
+    });
+
+    // 6. Run overlap resolution to guarantee maximum beauty
+    return resolveNodeOverlaps(positioned, 21);
+  }, [songDNA, familiarityLevel, discoveryMode, constellationSize, isTrackListened]);
 
   useEffect(() => {
     if (activeMapType === "artist") {
@@ -254,101 +459,6 @@ export default function App() {
       }
     }
   }, [familiarityLevel, filteredSimilarArtists, filteredSimilarTracks, activeMapType]);
-
-  // Artist discography drawer states
-  const [isDiscographyOpen, setIsDiscographyOpen] = useState(false);
-  const [activeDiscography, setActiveDiscography] = useState<ArtistDiscography | null>(null);
-  const [isDiscographyLoading, setIsDiscographyLoading] = useState(false);
-  const [discographyError, setDiscographyError] = useState<string | null>(null);
-
-  // Streaming History State Engine
-  const [streamingData, setStreamingData] = useState<{
-    raw: any[];
-    minDate: Date | null;
-    maxDate: Date | null;
-    totalPlays: number;
-    loadedFilesCount: number;
-  } | null>(() => {
-    try {
-      const cached = localStorage.getItem("spotify_streaming_summary_v1");
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        return {
-          raw: parsed.raw || [],
-          minDate: parsed.minDate ? new Date(parsed.minDate) : null,
-          maxDate: parsed.maxDate ? new Date(parsed.maxDate) : null,
-          totalPlays: parsed.totalPlays || 0,
-          loadedFilesCount: parsed.loadedFilesCount || 0
-        };
-      }
-    } catch (e) {
-      console.error("Failed to restore cached streaming summary", e);
-    }
-    return null;
-  });
-
-  const [isParsingStreaming, setIsParsingStreaming] = useState(false);
-  const [streamingParseError, setStreamingParseError] = useState<string | null>(null);
-  const [streamingFilesCount, setStreamingFilesCount] = useState(0);
-
-  // Filters within streaming history tab
-  const [streamingRange, setStreamingRange] = useState<"all_time" | "last_6_months" | "last_month">("all_time");
-  const [streamingCategory, setStreamingCategory] = useState<"tracks" | "artists" | "albums">("tracks");
-  const [streamingSearch, setStreamingSearch] = useState("");
-
-  const saveStreamingDataWithQuotaGuard = (data: {
-    raw: any[];
-    minDate: Date | null;
-    maxDate: Date | null;
-    totalPlays: number;
-    loadedFilesCount: number;
-  } | null) => {
-    setStreamingData(data);
-    if (!data) {
-      localStorage.removeItem("spotify_streaming_summary_v1");
-      return;
-    }
-    try {
-      const summaryString = JSON.stringify({
-        raw: data.raw,
-        minDate: data.minDate?.toISOString() || null,
-        maxDate: data.maxDate?.toISOString() || null,
-        totalPlays: data.totalPlays,
-        loadedFilesCount: data.loadedFilesCount
-      });
-      if (summaryString.length > 2000000) {
-        const limitedRaw = data.raw.slice(0, 5000);
-        const limitedString = JSON.stringify({
-          raw: limitedRaw,
-          minDate: data.minDate?.toISOString() || null,
-          maxDate: data.maxDate?.toISOString() || null,
-          totalPlays: data.totalPlays,
-          loadedFilesCount: data.loadedFilesCount,
-          isSummarized: true
-        });
-        localStorage.setItem("spotify_streaming_summary_v1", limitedString);
-      } else {
-        localStorage.setItem("spotify_streaming_summary_v1", summaryString);
-      }
-    } catch (e) {
-      console.warn("Storage quota exceeded. History cached in-memory only.", e);
-    }
-  };
-
-  const formatPlaytime = (ms: number): string => {
-    const seconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-
-    if (hours > 0) {
-      const remMin = minutes % 60;
-      return `${hours}h ${remMin}m`;
-    }
-    if (minutes > 0) {
-      return `${minutes}m`;
-    }
-    return `${seconds}s`;
-  };
 
 
   const streamingStats = React.useMemo(() => {
@@ -384,12 +494,23 @@ export default function App() {
       const artistMap = new Map<string, { name: string; count: number; ms: number }>();
       const albumMap = new Map<string, { title: string; artist: string; count: number; ms: number }>();
 
+      const cleanString = (str: string) => {
+        if (!str) return "";
+        let cleaned = str.split(" - ")[0]; // remove " - Remastered" etc
+        cleaned = cleaned.split(" (feat.")[0]; // remove featured artists
+        cleaned = cleaned.split(" [feat.")[0];
+        return cleaned.trim();
+      };
+
       plays.forEach(item => {
-        const trackName = item.master_metadata_track_name || item.trackName || "";
-        const artistName = item.master_metadata_album_artist_name || item.artistName || "";
-        const albumName = item.master_metadata_album_album_name || item.albumName || "Unknown Album";
+        const rawTrackName = item.master_metadata_track_name || item.trackName || "";
+        const rawArtistName = item.master_metadata_album_artist_name || item.artistName || "";
+        const trackName = cleanString(rawTrackName);
+        const artistName = cleanString(rawArtistName);
+        const albumName = cleanString(item.master_metadata_album_album_name || item.albumName || "Unknown Album");
         const ms = item.ms_played !== undefined ? item.ms_played : (item.msPlayed !== undefined ? item.msPlayed : 0);
         const uri = item.spotify_track_uri || "";
+
 
         const trackKey = `${trackName.toLowerCase().trim()}:::${artistName.toLowerCase().trim()}`;
         if (trackName && artistName) {
@@ -488,7 +609,7 @@ export default function App() {
   }, [streamingStats, streamingRange, streamingCategory, streamingSearch]);
 
 
-  const constellationSize = mapEngine === "gemini" ? constellationSizeAI : constellationSizeAPI;
+
   const setConstellationSize = (size: number) => {
     if (mapEngine === "gemini") {
       setConstellationSizeAI(size);
@@ -717,37 +838,31 @@ export default function App() {
     }
 
     let imageUrl = fallbackUrl;
-    if (freshToken) {
-      try {
-        const searchArtRes = await fetch(
-          `https://api.spotify.com/v1/search?q=${encodeURIComponent(name)}&type=artist&limit=1`,
-          { headers: { Authorization: `Bearer ${freshToken}` } }
-        );
-        if (searchArtRes.ok) {
-          const searchArtData = await searchArtRes.json();
-          const item = searchArtData.artists?.items?.[0];
-          if (item?.images?.[1]?.url || item?.images?.[0]?.url) {
-            imageUrl = item.images?.[1]?.url || item.images?.[0]?.url || fallbackUrl;
+    try {
+      const searchRes = await fetch(`/api/artist/image?artist=${encodeURIComponent(name)}`);
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        if (searchData?.imageUrl) {
+          imageUrl = searchData.imageUrl;
 
-            // Cache it globally via server endpoint
-            try {
-              console.log(`[CLIENT CACHE TRIGGER] Attempting to cache Artist image to Firestore via server. ID: "${cleanId}", URL: "${imageUrl}"`);
-              const cacheResponse = await fetch("/api/cache/image", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ id: cleanId, imageUrl })
-              });
-              if (cacheResponse.ok) {
-                console.log(`[CLIENT CACHE TRIGGER] Server reported successful write of Artist "${cleanId}".`);
-              } else {
-                console.warn(`[CLIENT CACHE TRIGGER] Server reported status error caching Artist "${cleanId}":`, cacheResponse.status);
-              }
-            } catch (cacheWriteErr) {
-              console.warn("Firestore cache image writing skipped or failed:", cacheWriteErr);
+          // Cache it globally via server endpoint
+          try {
+            console.log(`[CLIENT CACHE TRIGGER] Attempting to cache Artist image to Firestore via server. ID: "${cleanId}", URL: "${imageUrl}"`);
+            const cacheResponse = await fetch("/api/cache/image", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: cleanId, imageUrl })
+            });
+            if (cacheResponse.ok) {
+              console.log(`[CLIENT CACHE TRIGGER] Server reported successful write of Artist "${cleanId}".`);
             }
+          } catch (cacheWriteErr) {
+            console.warn("Firestore cache image writing skipped or failed:", cacheWriteErr);
           }
         }
-      } catch {}
+      }
+    } catch (err) {
+      console.warn("Deezer lookup failed for artist image:", err);
     }
     return imageUrl;
   };
@@ -771,37 +886,34 @@ export default function App() {
     }
 
     let imageUrl = fallbackUrl;
-    if (freshToken) {
-      try {
-        const sRes = await fetch(
-          `https://api.spotify.com/v1/search?q=${encodeURIComponent(fullQuery)}&type=track&limit=1`,
-          { headers: { Authorization: `Bearer ${freshToken}` } }
-        );
-        if (sRes.ok) {
-          const sData = await sRes.json();
-          const trackItem = sData.tracks?.items?.[0];
-          if (trackItem?.album?.images?.[1]?.url || trackItem?.album?.images?.[0]?.url) {
-            imageUrl = trackItem.album.images?.[1]?.url || trackItem.album.images?.[0]?.url || fallbackUrl;
+    try {
+      const sRes = await fetch(
+        `https://itunes.apple.com/search?term=${encodeURIComponent(fullQuery)}&limit=1&media=music`
+      );
+      if (sRes.ok) {
+        const sData = await sRes.json();
+        const trackItem = sData.results?.[0];
+        if (trackItem?.artworkUrl100) {
+          imageUrl = trackItem.artworkUrl100.replace("100x100bb", "400x400bb") || fallbackUrl;
 
-            // Cache it globally via server endpoint
-            try {
-              console.log(`[CLIENT CACHE TRIGGER] Attempting to cache Track image to Firestore via server. ID: "${cleanId}", URL: "${imageUrl}"`);
-              const cacheResponse = await fetch("/api/cache/image", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ id: cleanId, imageUrl })
-              });
-              if (cacheResponse.ok) {
-                console.log(`[CLIENT CACHE TRIGGER] Server reported successful write of Track "${cleanId}".`);
-              } else {
-                console.warn(`[CLIENT CACHE TRIGGER] Server reported status error caching Track "${cleanId}":`, cacheResponse.status);
-              }
-            } catch (cacheWriteErr) {
-              console.warn("Firestore cache image writing skipped or failed:", cacheWriteErr);
+          // Cache it globally via server endpoint
+          try {
+            console.log(`[CLIENT CACHE TRIGGER] Attempting to cache Track image to Firestore via server. ID: "${cleanId}", URL: "${imageUrl}"`);
+            const cacheResponse = await fetch("/api/cache/image", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: cleanId, imageUrl })
+            });
+            if (cacheResponse.ok) {
+              console.log(`[CLIENT CACHE TRIGGER] Server reported successful write of Track "${cleanId}".`);
             }
+          } catch (cacheWriteErr) {
+            console.warn("Firestore cache image writing skipped or failed:", cacheWriteErr);
           }
         }
-      } catch {}
+      }
+    } catch (err) {
+      console.warn("iTunes lookup failed for track image:", err);
     }
     return imageUrl;
   };
@@ -1322,7 +1434,21 @@ export default function App() {
     const enrichments = artists.map(async (node, index) => {
       if (node.imageUrl && !isPlaceholderImage(node.imageUrl)) return node;
 
-      // Try searching iTunes API for artist's release artwork!
+      // Try searching Deezer API first for artist's official portrait!
+      try {
+        const query = node.name.trim();
+        const res = await fetch(`/api/artist/image?artist=${encodeURIComponent(query)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.imageUrl) {
+            return { ...node, imageUrl: data.imageUrl };
+          }
+        }
+      } catch (err) {
+        console.warn("[DEEZER ARTIST BULK ENRICHMENT FAIL]:", err);
+      }
+
+      // Fallback: Try searching iTunes API for artist's release artwork!
       try {
         const query = node.name.trim();
         const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&limit=1&media=music`);
@@ -1364,6 +1490,12 @@ export default function App() {
     const enrichments = tracks.map(async (node, index) => {
       if (node.imageUrl && !isPlaceholderImage(node.imageUrl)) return node;
 
+      // Limit active iTunes requests to first 35 tracks to avoid API rate-limiting and stay snappy
+      if (index >= 35) {
+        const fallbackUrl = TRACK_MOCK_IMAGES[index % TRACK_MOCK_IMAGES.length];
+        return { ...node, imageUrl: fallbackUrl };
+      }
+
       // Try searching iTunes API for real album cover art!
       try {
         const query = `${node.title} ${node.artist}`.trim();
@@ -1389,6 +1521,15 @@ export default function App() {
     return Promise.all(enrichments);
   };
 
+  const addToRecentSearches = (item: {name: string, artist?: string, id: string, image?: string, isArtist?: boolean}) => {
+    setRecentSearches(prev => {
+      const filtered = prev.filter(t => t.name !== item.name); // basic dupe prevention
+      const newArr = [item, ...filtered].slice(0, 10);
+      localStorage.setItem("beat_browser_recent_searches", JSON.stringify(newArr));
+      return newArr;
+    });
+  };
+
   // Call backend or Spotify to map Artist Space
   const generateArtistDNA = async (artistName: string, sizeOverride?: number, engineOverride?: "gemini" | "spotify") => {
     setIsArtistDNALoading(true);
@@ -1410,11 +1551,48 @@ export default function App() {
          similarArtists = [];
       }
 
+      // Try fetching active artist's artwork from Deezer first
+      let artistImageUrl: string | undefined = undefined;
+      try {
+        const query = artistName.trim();
+        const deezerRes = await fetch(`/api/artist/image?artist=${encodeURIComponent(query)}`);
+        if (deezerRes.ok) {
+          const data = await deezerRes.json();
+          if (data.imageUrl) {
+            artistImageUrl = data.imageUrl;
+          }
+        }
+      } catch (err) {
+        console.warn("[DEEZER ACTIVE ARTIST IMAGE FAIL]:", err);
+      }
+
+      if (!artistImageUrl) {
+        if (selectedTrack && selectedTrack.artists?.some(a => a.name.toLowerCase() === artistName.toLowerCase())) {
+          artistImageUrl = selectedTrack.album?.images?.[0]?.url;
+        }
+      }
+
+      if (!artistImageUrl) {
+        try {
+          const query = artistName.trim();
+          const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(query)}&limit=1&media=music`);
+          if (itunesRes.ok) {
+            const data = await itunesRes.json();
+            if (data.results && data.results.length > 0) {
+              artistImageUrl = data.results[0].artworkUrl100?.replace("100x100bb", "400x400bb");
+            }
+          }
+        } catch (err) {
+          console.warn("[ITUNES ACTIVE ARTIST IMAGE FAIL]:", err);
+        }
+      }
+
       const initData: ArtistDNA = {
         name: artistName,
         genres: [],
         description: "Streaming AI reasoning...",
-        similarArtists
+        similarArtists,
+        imageUrl: artistImageUrl
       };
 
       setArtistDNA(initData);
@@ -1719,8 +1897,21 @@ export default function App() {
             parsedRecords.push(...parsed);
             totalRead++;
           } else if (typeof parsed === "object" && parsed !== null) {
-            parsedRecords.push(parsed);
-            totalRead++;
+            // Check for nested arrays (e.g. { items: [...] } or { data: [...] })
+            let foundArray = false;
+            for (const key of Object.keys(parsed)) {
+              if (Array.isArray(parsed[key])) {
+                parsedRecords.push(...parsed[key]);
+                foundArray = true;
+                totalRead++;
+              }
+            }
+            // If no nested array, treat the object itself as a single record if it has track info, 
+            // otherwise it might be a wrapper.
+            if (!foundArray) {
+              parsedRecords.push(parsed);
+              totalRead++;
+            }
           }
         } catch (jsonErr) {
           console.warn(`[Streaming History] Skipping non-JSON file: ${file.name}`);
@@ -1887,8 +2078,8 @@ export default function App() {
     const activeSize = sizeOverride !== undefined ? sizeOverride : constellationSize;
 
     try {
-      // 1. Fetch similar tracks incredibly quickly from Last.fm
-      const lastfmRes = await fetch(`/api/lastfm/similar-tracks?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artists[0]?.name || "Unknown Artist")}&limit=${activeSize}`);
+      // 1. Fetch similar tracks incredibly quickly from Last.fm (fetch a pool of 100 to allow robust personal streaming history filtration)
+      const lastfmRes = await fetch(`/api/lastfm/similar-tracks?track=${encodeURIComponent(track.name)}&artist=${encodeURIComponent(track.artists[0]?.name || "Unknown Artist")}&limit=100`);
       let similarTracks = await lastfmRes.json();
       
       if (similarTracks) {
@@ -2083,11 +2274,11 @@ export default function App() {
               </div>
               <div>
                 <h1 className="text-lg font-semibold font-display tracking-tight text-white flex items-center gap-1.5 leading-none">
-                  Sonic DNA
-                  <span className="text-xs bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">LAB</span>
+                  BeatBrowser
+                  <span className="text-xs bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-500/20 font-mono">APP</span>
                 </h1>
                 <div className="flex items-center space-x-1.5 mt-0.5">
-                  <p className="text-[10px] text-slate-500 font-mono tracking-widest uppercase">Global Sonic Vectors</p>
+                  <p className="text-[10px] text-slate-500 font-mono tracking-widest uppercase">Global Playback Constellations</p>
                   <span className="w-1 h-1 rounded-full bg-emerald-500"></span>
                   <span className="text-[9px] text-emerald-450 font-semibold tracking-wider font-mono">Gemini Musicologist Edition</span>
                 </div>
@@ -2366,7 +2557,13 @@ export default function App() {
                                     id: "dummy",
                                     name: fav.name,
                                     artists: [{ id: "dummy", name: fav.name }],
-                                    album: { images: fav.nodes?.[0]?.imageUrl ? [{ url: fav.nodes[0].imageUrl }] : [] },
+                                    album: {
+                                      id: "dummy",
+                                      name: fav.name,
+                                      images: fav.nodes?.[0]?.imageUrl ? [{ url: fav.nodes[0].imageUrl }] : [],
+                                      release_date: ""
+                                    },
+                                    duration_ms: 180000,
                                     popularity: 80,
                                     preview_url: null,
                                     uri: ""
@@ -2376,7 +2573,13 @@ export default function App() {
                                     id: "dummy",
                                     name: fav.name,
                                     artists: [{ id: "dummy", name: fav.artist || "" }],
-                                    album: { images: fav.nodes?.[0]?.imageUrl ? [{ url: fav.nodes[0].imageUrl }] : [] },
+                                    album: {
+                                      id: "dummy",
+                                      name: fav.name,
+                                      images: fav.nodes?.[0]?.imageUrl ? [{ url: fav.nodes[0].imageUrl }] : [],
+                                      release_date: ""
+                                    },
+                                    duration_ms: 180000,
                                     popularity: 80,
                                     preview_url: null,
                                     uri: ""
@@ -2486,7 +2689,9 @@ export default function App() {
                           <div className="space-y-3.5 text-[10px] leading-relaxed">
                             <div className="space-y-1">
                               <p className="text-white font-semibold flex items-center gap-1">🟢 Spotify History</p>
-                              <p className="text-slate-500 pl-4">Upload <code className="text-emerald-400 font-mono">StreamingHistory_music_*.json</code> or <code className="text-emerald-400 font-mono">Audio_Streaming_History_*.json</code> files exported from your Spotify privacy dashboard.</p>
+                              <p className="text-slate-400 pl-4">
+                                Go directly to the <a href="https://www.spotify.com/account/privacy/" target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline font-semibold">Spotify Privacy Settings</a>, scroll down to <span className="text-slate-200">"Request your data"</span>, and request your account data. In a few days, you'll receive a link to download a ZIP file. Extract it and upload any <code className="text-emerald-300 font-mono">StreamingHistory_music_*.json</code> or <code className="text-emerald-300 font-mono">Audio_Streaming_History_*.json</code> files.
+                              </p>
                             </div>
                             
                             <div className="space-y-1 border-t border-white/5 pt-2">
@@ -2500,8 +2705,17 @@ export default function App() {
                             </div>
 
                             <div className="space-y-1 border-t border-white/5 pt-2">
-                              <p className="text-white font-semibold flex items-center gap-1">🔵 Amazon Music & Tidal</p>
-                              <p className="text-slate-400 pl-4">Tidal playbacks or Amazon Music standard JSON playback history exports are fully supported.</p>
+                              <p className="text-white font-semibold flex items-center gap-1">🔵 Amazon Music</p>
+                              <p className="text-slate-400 pl-4">
+                                Request your playback history at <a href="https://www.amazon.com/gp/privacycentral/dsar/preview.html" target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline font-semibold">Amazon Privacy Central</a>. Select <span className="text-slate-200 font-medium">"Amazon Music"</span> from the service dropdown and submit. Once available, download and extract the ZIP to locate your playback history JSON.
+                              </p>
+                            </div>
+
+                            <div className="space-y-1 border-t border-white/5 pt-2">
+                              <p className="text-white font-semibold flex items-center gap-1">🌊 Tidal History</p>
+                              <p className="text-slate-400 pl-4">
+                                Log into <a href="https://my.tidal.com" target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline font-semibold">TIDAL Account Portal</a>, head to <span className="text-slate-200">"Privacy & Security"</span> and submit a request via <span className="text-slate-200">"Request a copy of your personal data"</span>. Upload the resulting streaming log JSON files directly.
+                              </p>
                             </div>
                           </div>
                         </div>
@@ -2741,8 +2955,10 @@ export default function App() {
                           onClick={() => {
                             if (isArtist) {
                               generateArtistDNA(track.name);
+                              addToRecentSearches({ name: track.name, id: track.id, image: track.album?.images?.[0]?.url, isArtist: true });
                             } else {
                               generateSongDNA(track);
+                              addToRecentSearches({ name: track.name, artist: track.artists?.[0]?.name, id: track.id, image: track.album?.images?.[0]?.url, isArtist: false });
                             }
                           }}
                           className={`flex items-center space-x-3 p-3 border-b border-white/5 hover:bg-white/5 cursor-pointer transition-all ${
@@ -2815,7 +3031,7 @@ export default function App() {
 
                 <div className="space-y-3 max-w-xl relative z-10 p-2">
                   <h2 className="text-2xl md:text-3xl font-display font-medium text-white tracking-tight">
-                    Model Sonic DNA & Discover <span className="text-emerald-400">Related Stars</span>
+                    Model Song DNA & Discover <span className="text-emerald-400">Related Stars</span>
                   </h2>
                   <p className="text-sm text-slate-500 leading-relaxed font-sans font-light">
                     Every song has a unique genomic code. Select any song from your top charts or perform a dynamic search to trace its composition DNA. Gemini will map coordinates of overlapping tracks inside an interactive constellation space!
@@ -2823,24 +3039,60 @@ export default function App() {
                 </div>
 
                 <div className="relative z-10 pt-4 max-w-md w-full grid grid-cols-1 gap-3">
-                  <button
-                    onClick={() => generateSongDNA(DEMO_SHORT_TERM_TRACKS[0])}
-                    className="flex items-center justify-between bg-[#161618] hover:bg-[#2A2A2D] p-4 rounded-3xl border border-white/5 text-xs font-semibold text-white transition-all cursor-pointer group shadow-lg shadow-black/25"
-                  >
-                    <div className="flex items-center space-x-3">
-                      <div className="w-8 h-8 rounded-lg overflow-hidden bg-slate-800">
-                        <img src="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=80&h=80&fit=crop" alt="Cover" className="w-full h-full object-cover" />
+                  {recentSearches.length > 0 ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center space-x-2 text-slate-400 pb-1 border-b border-white/5">
+                        <History className="w-3.5 h-3.5" />
+                        <span className="text-xs font-mono uppercase tracking-widest">Recent Explorations</span>
                       </div>
-                      <div className="text-left">
-                        <p className="font-bold">Try Sandbox Blueprint</p>
-                        <p className="text-[10px] text-slate-500 mt-0.5 font-light">"Blinding Lights" by The Weeknd</p>
+                      {recentSearches.slice(0, 4).map((item, i) => (
+                        <button
+                          key={item.id + i}
+                          onClick={() => {
+                            if (item.isArtist) {
+                              generateArtistDNA(item.name);
+                            } else {
+                              generateSongDNA({ id: item.id, name: item.name, artists: [{ name: item.artist || "" }], uri: "spotify:track:" + item.id } as any);
+                            }
+                          }}
+                          className="flex w-full items-center justify-between bg-[#161618] hover:bg-[#2A2A2D] p-3 rounded-3xl border border-white/5 text-xs font-semibold text-white transition-all cursor-pointer group shadow-lg shadow-black/25 text-left"
+                        >
+                          <div className="flex items-center space-x-3">
+                            <div className="w-8 h-8 rounded-lg overflow-hidden bg-slate-800 shrink-0">
+                              <SafeImage src={item.image} alt="Cover" className="w-full h-full object-cover" />
+                            </div>
+                            <div className="text-left w-full overflow-hidden leading-tight">
+                              <p className="font-bold truncate">{item.name}</p>
+                              {item.artist && <p className="text-[10px] text-slate-500 mt-0.5 font-light truncate">{item.artist}</p>}
+                            </div>
+                          </div>
+                          <div className="flex items-center space-x-1.5 text-xs text-emerald-400 font-mono font-semibold opacity-0 group-hover:opacity-100 group-hover:translate-x-0 -translate-x-2 transition-all">
+                            <span>Analyze</span>
+                            <Sparkles className="w-3 h-3" />
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => generateSongDNA(DEMO_SHORT_TERM_TRACKS[0])}
+                      className="flex items-center justify-between bg-[#161618] hover:bg-[#2A2A2D] p-4 rounded-3xl border border-white/5 text-xs font-semibold text-white transition-all cursor-pointer group shadow-lg shadow-black/25"
+                    >
+                      <div className="flex items-center space-x-3">
+                        <div className="w-8 h-8 rounded-lg overflow-hidden bg-slate-800">
+                          <img src="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=80&h=80&fit=crop" alt="Cover" className="w-full h-full object-cover" />
+                        </div>
+                        <div className="text-left">
+                          <p className="font-bold">Try Sandbox Blueprint</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5 font-light">"Blinding Lights" by The Weeknd</p>
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex items-center space-x-1.5 text-xs text-emerald-400 font-mono font-semibold group-hover:translate-x-1 transition-all">
-                      <span>Analyze</span>
-                      <Sparkles className="w-3.5 h-3.5" />
-                    </div>
-                  </button>
+                      <div className="flex items-center space-x-1.5 text-xs text-emerald-400 font-mono font-semibold group-hover:translate-x-1 transition-all">
+                        <span>Analyze</span>
+                        <Sparkles className="w-3.5 h-3.5" />
+                      </div>
+                    </button>
+                  )}
                 </div>
 
               </div>
@@ -2897,21 +3149,38 @@ export default function App() {
               <div className="space-y-6 flex-1 flex flex-col" id="dna_rendering_main">
                 
                 {/* Part A: Main Title and DNA summary overview cell */}
-                <div className="bg-[#141416] rounded-3xl border border-white/5 p-5 md:p-6 shadow-2xl flex flex-col md:flex-row gap-5 relative overflow-hidden">
+                <div className="bg-[#141416] rounded-3xl border border-white/5 p-5 md:p-6 shadow-2xl flex flex-col md:flex-row gap-5 relative overflow-hidden group">
                   
                   {/* Glowing core decor */}
                   <div className="absolute top-0 right-0 w-[120px] h-[120px] bg-[radial-gradient(rgba(16,185,129,0.04),transparent_60%)] z-0" />
                   
+                  {/* Close/Back Button */}
+                  <button 
+                    onClick={() => {
+                        setSelectedTrack(null);
+                        setSongDNAState(null);
+                        setArtistDNAState(null);
+                    }}
+                    className="absolute top-4 right-4 text-slate-500 hover:text-white hover:bg-white/10 w-8 h-8 rounded-full flex items-center justify-center transition-all z-20"
+                    title="Close and return to search"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                  
                   {/* Big Image/Art */}
                   <div className="w-24 h-24 md:w-32 md:h-32 rounded-2xl overflow-hidden bg-slate-800 flex-shrink-0 border border-white/5 shadow-xl relative self-center md:self-start">
                     {activeMapType === "artist" ? (
-                      <div className="w-full h-full relative bg-cover bg-center" style={{ backgroundImage: `url('https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=150&h=150&fit=crop')` }}>
-                        <div className="absolute inset-0 bg-[#000]/40 backdrop-blur-[2px] flex items-center justify-center">
-                          <User className="w-8 h-8 text-emerald-400 animate-pulse" />
+                      artistDNA?.imageUrl ? (
+                        <SafeImage src={artistDNA.imageUrl} alt={artistDNA.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full relative bg-cover bg-center" style={{ backgroundImage: `url('https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=150&h=150&fit=crop')` }}>
+                          <div className="absolute inset-0 bg-[#000]/40 backdrop-blur-[2px] flex items-center justify-center">
+                            <User className="w-8 h-8 text-emerald-400 animate-pulse" />
+                          </div>
                         </div>
-                      </div>
+                      )
                     ) : (
-                      <SafeImage src={selectedTrack.album?.images?.[0]?.url} alt={selectedTrack.name} className="w-full h-full object-cover" />
+                      <SafeImage src={selectedTrack?.album?.images?.[0]?.url} alt={selectedTrack?.name} className="w-full h-full object-cover" />
                     )}
                     
                     {/* Floating Audio preview bubble on Artwork overlay */}
@@ -3012,25 +3281,13 @@ export default function App() {
                         )}
                         
                         {activeMapType === "artist" && artistDNA && (
-                          <>
-                            <button
-                              onClick={() => loadDiscography(artistDNA.name)}
-                              className="flex items-center space-x-1.5 bg-emerald-500 hover:bg-emerald-400 text-black text-[10px] font-bold rounded-full px-4 py-2 transition-all cursor-pointer shadow-lg shadow-[#10b981]/15"
-                            >
-                              <Disc className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "8s" }} />
-                              <span>See Discography</span>
-                            </button>
-
-                            <a
-                              href={`https://open.spotify.com/search/${encodeURIComponent(artistDNA.name)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="flex items-center space-x-1.5 bg-emerald-500/10 hover:bg-emerald-500/25 text-emerald-400 text-[10px] font-bold border border-emerald-500/20 rounded-full px-4 py-2 transition-all cursor-pointer"
-                            >
-                              <span>Artist Search</span>
-                              <ExternalLink className="w-3.5 h-3.5" />
-                            </a>
-                          </>
+                          <button
+                            onClick={() => loadDiscography(artistDNA.name)}
+                            className="flex items-center space-x-1.5 bg-emerald-500 hover:bg-emerald-400 text-black text-[10px] font-bold rounded-full px-4 py-2 transition-all cursor-pointer shadow-lg shadow-[#10b981]/15"
+                          >
+                            <Disc className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "8s" }} />
+                            <span>See Discography</span>
+                          </button>
                         )}
                       </div>
                     </div>
@@ -3272,39 +3529,44 @@ export default function App() {
 
                   {/* Right Column 2D Coordinate Discovery Star-map */}
                   {!isFullscreenMap && (
-<ConstellationMap
-  activeMapType={activeMapType}
-  coreName={activeMapType === 'artist' ? (artistDNA?.name || '') : (songDNA?.name || '')}
-  filteredSimilarArtists={filteredSimilarArtists}
-  filteredSimilarTracks={filteredSimilarTracks}
-  selectedArtistConstellationNode={selectedArtistConstellationNode}
-  setSelectedArtistConstellationNode={setSelectedArtistConstellationNode}
-  selectedConstellationNode={selectedConstellationNode}
-  setSelectedConstellationNode={setSelectedConstellationNode}
-  constellationSize={constellationSize}
-  setConstellationSize={setConstellationSize}
-  familiarityLevel={familiarityLevel}
-  setFamiliarityLevel={setFamiliarityLevel}
-  isDNALoading={isDNALoading}
-  isArtistDNALoading={isArtistDNALoading}
-  isFullscreenMap={isFullscreenMap}
-  setIsFullscreenMap={setIsFullscreenMap}
-  isMapExpanded={isMapExpanded}
-  setIsMapExpanded={setIsMapExpanded}
-  traverseToRecommendation={traverseToRecommendation}
-  generateArtistDNA={generateArtistDNA}
-  generateSongDNA={generateSongDNA}
-  selectedTrack={selectedTrack}
-  artistDNA={artistDNA}
-  songDNA={songDNA}
-  activePreviewUrl={activePreviewUrl}
-  isPlaying={isPlaying}
-  toggleAudioPlaying={toggleAudioPlaying}
-  mapEngine={mapEngine}
-  setSelectedTrack={setSelectedTrack}
-  loadDiscography={loadDiscography}
-/>
-)}
+                    <div className={`col-span-12 ${isMapExpanded ? "md:col-span-12 order-1" : "md:col-span-7 order-2"}`}>
+                      <ConstellationMap
+                        activeMapType={activeMapType}
+                        coreName={activeMapType === 'artist' ? (artistDNA?.name || '') : (songDNA?.name || '')}
+                        filteredSimilarArtists={filteredSimilarArtists}
+                        filteredSimilarTracks={filteredSimilarTracks}
+                        selectedArtistConstellationNode={selectedArtistConstellationNode}
+                        setSelectedArtistConstellationNode={setSelectedArtistConstellationNode}
+                        selectedConstellationNode={selectedConstellationNode}
+                        setSelectedConstellationNode={setSelectedConstellationNode}
+                        constellationSize={constellationSize}
+                        setConstellationSize={setConstellationSize}
+                        familiarityLevel={familiarityLevel}
+                        setFamiliarityLevel={setFamiliarityLevel}
+                        discoveryMode={discoveryMode}
+                        setDiscoveryMode={setDiscoveryMode}
+                        hasStreamingHistory={!!streamingData}
+                        isDNALoading={isDNALoading}
+                        isArtistDNALoading={isArtistDNALoading}
+                        isFullscreenMap={isFullscreenMap}
+                        setIsFullscreenMap={setIsFullscreenMap}
+                        isMapExpanded={isMapExpanded}
+                        setIsMapExpanded={setIsMapExpanded}
+                        traverseToRecommendation={traverseToRecommendation}
+                        generateArtistDNA={generateArtistDNA}
+                        generateSongDNA={generateSongDNA}
+                        selectedTrack={selectedTrack}
+                        artistDNA={artistDNA}
+                        songDNA={songDNA}
+                        activePreviewUrl={activePreviewUrl}
+                        isPlaying={isPlaying}
+                        toggleAudioPlaying={toggleAudioPlaying}
+                        mapEngine={mapEngine}
+                        setSelectedTrack={setSelectedTrack}
+                        loadDiscography={loadDiscography}
+                      />
+                    </div>
+                  )}
 
 
                 </div>
@@ -3330,6 +3592,9 @@ export default function App() {
   setConstellationSize={setConstellationSize}
   familiarityLevel={familiarityLevel}
   setFamiliarityLevel={setFamiliarityLevel}
+  discoveryMode={discoveryMode}
+  setDiscoveryMode={setDiscoveryMode}
+  hasStreamingHistory={!!streamingData}
   isDNALoading={isDNALoading}
   isArtistDNALoading={isArtistDNALoading}
   isFullscreenMap={isFullscreenMap}
@@ -3355,7 +3620,7 @@ export default function App() {
         <footer className="border-t border-white/5 py-6 bg-[#050505]/95">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-4 text-xs font-mono text-slate-500">
             <p className="flex items-center flex-wrap gap-x-2 gap-y-1">
-              <span>© 2026 Sonic DNA research console. Model predictions powered server-side by Gemini.</span>
+              <span>© 2026 BeatBrowser console. Model predictions powered server-side by Gemini.</span>
             </p>
           </div>
         </footer>
@@ -3440,13 +3705,18 @@ export default function App() {
                     </div>
 
                     <div className="space-y-4">
-                      {activeDiscography.albums.map((album, idx) => (
-                        <div 
-                          key={idx}
-                          className="bg-[#141416]/95 border border-white/5 rounded-2xl p-4 md:p-5 hover:border-emerald-500/20 hover:bg-[#16161a] hover:shadow-[0_4px_30px_rgba(16,185,129,0.02)] transition-all duration-300 flex flex-col sm:flex-row gap-4 relative overflow-hidden group"
-                        >
-                          {/* Accent glow on hover */}
-                          <div className="absolute top-0 right-0 w-32 h-32 bg-[radial-gradient(rgba(16,185,129,0.015),transparent_60%)] pointer-events-none" />
+                      {activeDiscography.albums.length === 0 ? (
+                        <div className="text-center p-12 border border-white/5 rounded-2xl border-dashed">
+                          <p className="text-xs text-slate-500 font-mono uppercase tracking-tight">No releases found for this artist in our catalog.</p>
+                        </div>
+                      ) : (
+                        activeDiscography.albums.map((album, idx) => (
+                          <div 
+                            key={idx}
+                            className="bg-[#141416]/95 border border-white/5 rounded-2xl p-4 md:p-5 hover:border-emerald-500/20 hover:bg-[#16161a] hover:shadow-[0_4px_30px_rgba(16,185,129,0.02)] transition-all duration-300 flex flex-col sm:flex-row gap-4 relative overflow-hidden group"
+                          >
+                            {/* Accent glow on hover */}
+                            <div className="absolute top-0 right-0 w-32 h-32 bg-[radial-gradient(rgba(16,185,129,0.015),transparent_60%)] pointer-events-none" />
 
                           {/* Album Art container */}
                           <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-xl overflow-hidden bg-[#18181b] border border-white/10 flex-shrink-0 relative group-hover:border-emerald-500/30 transition-all shadow-md self-start">
@@ -3486,40 +3756,27 @@ export default function App() {
                             </p>
 
                             {/* Breakout Key Tracks list */}
-                            <div className="pt-2">
-                              <span className="text-[8px] font-mono font-bold text-emerald-400/80 uppercase tracking-widest block mb-1">
-                                Carrier Highlights
-                              </span>
-                              <div className="flex flex-wrap gap-1">
-                                {album.keyTracks.map((trackName, tIdx) => (
-                                  <span 
-                                    key={tIdx}
-                                    className="text-[9px] font-mono bg-[#050505]/80 text-[#94a3b8] px-2 py-0.5 rounded border border-white/5 flex items-center space-x-1"
-                                  >
-                                    <span className="text-[7.5px] text-emerald-400 font-extrabold">★</span>
-                                    <span className="font-semibold">{trackName}</span>
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* Direct link streaming */}
-                            {album.spotifyUrl && (
-                              <div className="pt-2.5 flex justify-end">
-                                <a
-                                  href={album.spotifyUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center space-x-1 bg-emerald-500/10 hover:bg-emerald-500/25 text-emerald-400 text-[9.5px] font-extrabold border border-emerald-500/20 rounded-md px-2.5 py-1 transition-all cursor-pointer"
-                                >
-                                  <span>Open Music Stream</span>
-                                  <ExternalLink className="w-2.5 h-2.5" />
-                                </a>
+                            {album.keyTracks && album.keyTracks.length > 0 && album.keyTracks.every(t => !t.toLowerCase().includes("apple music")) && (
+                              <div className="pt-2">
+                                <span className="text-[8px] font-mono font-bold text-emerald-400/80 uppercase tracking-widest block mb-1">
+                                  Carrier Highlights
+                                </span>
+                                <div className="flex flex-wrap gap-1">
+                                  {album.keyTracks.map((trackName, tIdx) => (
+                                    <span 
+                                      key={tIdx}
+                                      className="text-[9px] font-mono bg-[#050505]/80 text-[#94a3b8] px-2 py-0.5 rounded border border-white/5 flex items-center space-x-1"
+                                    >
+                                      <span className="text-[7.5px] text-emerald-400 font-extrabold">★</span>
+                                      <span className="font-semibold">{trackName}</span>
+                                    </span>
+                                  ))}
+                                </div>
                               </div>
                             )}
                           </div>
                         </div>
-                      ))}
+                      )))}
                     </div>
                   </div>
                 ) : (

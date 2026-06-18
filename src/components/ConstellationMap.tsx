@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Compass, User, Disc, RotateCcw, Maximize2, Minimize2, Layers, Check, Play, Square, ChevronRight } from 'lucide-react';
+import { Compass, User, Disc, RotateCcw, Maximize2, Minimize2, Layers, Check, Play, Square, ChevronRight, Sparkles, AlertCircle } from 'lucide-react';
 import { ConnectionNode, ArtistConnectionNode } from '../types';
 
 import { SafeImage } from './SafeImage';
@@ -16,6 +16,9 @@ export interface ConstellationMapProps {
   setConstellationSize: (size: number) => void;
   familiarityLevel: "all" | "familiar" | "mainstream";
   setFamiliarityLevel: (level: "all" | "familiar" | "mainstream") => void;
+  discoveryMode?: "curiosity" | "nostalgia";
+  setDiscoveryMode?: (mode: "curiosity" | "nostalgia") => void;
+  hasStreamingHistory?: boolean;
   isDNALoading: boolean;
   isArtistDNALoading: boolean;
   isFullscreenMap: boolean;
@@ -49,6 +52,9 @@ export const ConstellationMap: React.FC<ConstellationMapProps> = ({
   setConstellationSize,
   familiarityLevel,
   setFamiliarityLevel,
+  discoveryMode = "curiosity",
+  setDiscoveryMode,
+  hasStreamingHistory = false,
   isDNALoading,
   isArtistDNALoading,
   isFullscreenMap,
@@ -213,6 +219,39 @@ export const ConstellationMap: React.FC<ConstellationMapProps> = ({
                 })}
               </div>
 
+              {/* Personalization Mode Selector (Curiosity vs Nostalgia) */}
+              {activeMapType === "song" && hasStreamingHistory && setDiscoveryMode && (
+                <div className="flex items-center space-x-1 bg-[#050505] p-1 rounded-lg border border-white/5 font-mono text-[9px] text-slate-400 mr-1 shadow-inner animate-fade-in">
+                  <span className="px-1 text-slate-500 font-mono text-[8px] uppercase tracking-wider flex items-center gap-0.5">
+                    <Sparkles className="w-2.5 h-2.5 text-emerald-400" /> MODE:
+                  </span>
+                  {(["curiosity", "nostalgia"] as const).map((mode) => {
+                    const isActive = discoveryMode === mode;
+                    const label = mode === "curiosity" ? "Curiosity 🧭" : "Nostalgia 🎧";
+                    const tooltip = mode === mode
+                      ? mode === "curiosity" 
+                        ? "Curiosity: Prioritize undiscovered nodes to explore fresh pathways first"
+                        : "Nostalgia: Prioritize played history / matching listened tracks first"
+                      : "";
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setDiscoveryMode(mode)}
+                        className={`px-1.5 py-0.5 rounded transition-all cursor-pointer font-bold ${
+                          isActive 
+                            ? "bg-emerald-500 text-black font-extrabold" 
+                            : "hover:bg-white/5 hover:text-white"
+                        }`}
+                        title={tooltip}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               {/* Zoom controls */}
               <div className="flex items-center space-x-1 bg-[#050505] p-1 rounded-lg border border-white/5 font-mono text-[9px] text-slate-400 mr-1 shadow-inner">
                 <span className="px-1 text-slate-500 font-mono text-[8px] uppercase tracking-wider">ZOOM:</span>
@@ -284,8 +323,8 @@ export const ConstellationMap: React.FC<ConstellationMapProps> = ({
           onMouseMove={handleMapMouseMove}
           onMouseUp={handleMapMouseUpOrLeave}
           onMouseLeave={handleMapMouseUpOrLeave}
-          className={`bg-[#050505] rounded-2xl border border-white/5 w-full relative overflow-hidden flex-1 flex items-center justify-center my-2 select-none transition-all duration-300 ${
-            isFullscreen ? "h-[68vh] md:h-[72vh] flex-1" : isMapExpanded ? "h-[500px]" : "h-[360px]"
+          className={`bg-[#050505] rounded-2xl border border-white/5 w-full relative overflow-hidden flex-1 flex items-center justify-center my-2 select-none transition-all duration-300 shrink-0 ${
+            isFullscreen ? "min-h-[68vh] md:min-h-[72vh]" : isMapExpanded ? "min-h-[500px]" : "min-h-[360px]"
           } cursor-${isDraggingMap ? 'grabbing' : 'grab'}`} 
           id="music_constellation_canvas"
         >
@@ -457,28 +496,40 @@ export const ConstellationMap: React.FC<ConstellationMapProps> = ({
                     className="absolute -translate-x-1/2 -translate-y-1/2 z-30 transition-all duration-300 group flex flex-col items-center pointer-events-auto"
                     style={{ left: `${leftPct}%`, top: `${topPct}%` }}
                   >
-                    <button
-                      onClick={() => setSelectedConstellationNode(node)}
-                      className={`w-9 h-9 rounded-full border-2 overflow-hidden flex items-center justify-center cursor-pointer transition-all hover:scale-130 hover:shadow-[0_0_15px_rgba(16,185,129,0.5)] ${
-                        isHighlighted 
-                          ? "bg-emerald-500 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]" 
-                          : "bg-[#161618] border-white/10"
-                      }`}
-                      title={`${node.title} - ${node.artist}`}
-                    >
-                      <SafeImage
-                        src={node.imageUrl}
-                        alt={node.title}
-                        className="w-full h-full object-cover"
-                      />
-                    </button>
+                    <div className="relative">
+                      {node.isListened && (
+                        <div className="absolute top-0 right-0 w-3 h-3 bg-emerald-500 rounded-full border border-black flex items-center justify-center text-[6px] text-black font-extrabold shadow-md z-45 transform translate-x-1 -translate-y-1" title="Already played in your streaming history">
+                          ✓
+                        </div>
+                      )}
+                      <button
+                        onClick={() => setSelectedConstellationNode(node)}
+                        className={`w-9 h-9 rounded-full border-2 overflow-hidden flex items-center justify-center cursor-pointer transition-all hover:scale-130 hover:shadow-[0_0_15px_rgba(16,185,129,0.5)] ${
+                          isHighlighted 
+                            ? "bg-emerald-500 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]" 
+                            : node.isListened 
+                              ? "bg-[#101012] border-emerald-500/40 hover:border-emerald-400"
+                              : "bg-[#161618] border-white/10"
+                        }`}
+                        title={`${node.title} - ${node.artist}`}
+                      >
+                        <SafeImage
+                          src={node.imageUrl}
+                          alt={node.title}
+                          className="w-full h-full object-cover"
+                        />
+                      </button>
+                    </div>
                     
                     {/* Under-node Label */}
-                    <span className={`text-[8.5px] font-mono mt-1 px-1.5 py-0.5 rounded leading-none max-w-[90px] truncate text-center transition-all bg-black/80 pointer-events-none border ${
+                    <span className={`text-[8.5px] font-mono mt-1 px-1.5 py-0.5 rounded leading-none max-w-[90px] truncate text-center transition-all bg-black/80 pointer-events-none border flex items-center justify-center gap-0.5 ${
                       isHighlighted
                         ? "text-emerald-400 font-bold border-emerald-500/30 bg-black"
-                        : "text-slate-400 border-transparent group-hover:text-white group-hover:border-white/10"
+                        : node.isListened
+                          ? "text-emerald-400/90 border-emerald-500/10 group-hover:text-white"
+                          : "text-slate-400 border-transparent group-hover:text-white group-hover:border-white/10"
                     }`}>
+                      {node.isListened && <span className="text-[7.5px]" title="Played History 🎧">🎧</span>}
                       {node.title}
                     </span>
                     
@@ -490,6 +541,12 @@ export const ConstellationMap: React.FC<ConstellationMapProps> = ({
                         <span>Similarity</span>
                         <span className="font-bold text-slate-300">{node.similarityScore}%</span>
                       </div>
+                      {node.isListened && (
+                        <div className="text-[7px] text-emerald-400 font-semibold font-mono mt-0.5 pt-0.5 border-t border-white/5 flex justify-between uppercase">
+                          <span>Status</span>
+                          <span className="font-bold flex items-center gap-0.5">PLAYED 🎧</span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

@@ -54,6 +54,7 @@ export interface ConnectionNode {
   imageUrl?: string;
   musicBrainzReleaseId?: string;
   popularity?: number; // 0 to 100 general mainstream familiarity
+  isListened?: boolean;
 }
 
 export interface SongDNA {
@@ -83,6 +84,7 @@ export interface ArtistDNA {
   genres: string[];
   description: string;
   similarArtists: ArtistConnectionNode[];
+  imageUrl?: string;
 }
 
 export interface AlbumDiscographyItem {

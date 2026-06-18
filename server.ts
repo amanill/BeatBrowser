@@ -405,6 +405,31 @@ async function startServer() {
     }
   });
 
+  app.get("/api/artist/image", async (req, res) => {
+    const artist = req.query.artist as string;
+    if (!artist) {
+      return res.status(400).json({ error: "missing artist parameter" });
+    }
+    try {
+      const url = `https://api.deezer.com/search/artist?q=${encodeURIComponent(artist.trim())}`;
+      const searchRes = await fetch(url);
+      if (searchRes.ok) {
+        const data = await searchRes.json();
+        const item = data.data?.[0];
+        if (item) {
+          const imageUrl = item.picture_xl || item.picture_big || item.picture_medium;
+          if (imageUrl) {
+            return res.json({ imageUrl });
+          }
+        }
+      }
+      return res.json({ imageUrl: null });
+    } catch (e) {
+      console.error("[DEEZER PROXY ERROR]:", e);
+      return res.json({ imageUrl: null });
+    }
+  });
+
   app.get("/api/lastfm/similar-artists", async (req, res) => {
     const artist = req.query.artist as string;
     const limit = (req.query.limit as string) || '20';
@@ -906,7 +931,7 @@ async function startServer() {
 
     return {
       artist: artistName,
-      albums
+      albums: albums.filter((a: any) => a.type !== "Single")
     };
   }
 
@@ -1414,6 +1439,170 @@ Output strictly formatted JSON matching the requested schema.`;
       return res.json(cached);
     }
 
+    try {
+      // Priority 1: High Fidelity Real Data via iTunes Search API (no API key required)
+      const albumRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(artistName)}&entity=album&limit=200`);
+      if (albumRes.ok) {
+        const albumData = await albumRes.json();
+        
+        const songRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(artistName)}&entity=song&limit=200`);
+        const songData = await songRes.ok ? await songRes.json() : { results: [] };
+
+        const songsByAlbum: Record<string, string[]> = {};
+        for (const song of songData.results) {
+          if (song.collectionName) {
+            if (!songsByAlbum[song.collectionName]) {
+              songsByAlbum[song.collectionName] = [];
+            }
+            if (songsByAlbum[song.collectionName].length < 3) {
+              songsByAlbum[song.collectionName].push(song.trackName);
+            }
+          }
+        }
+
+        const sortedAlbums = albumData.results
+          .filter((a: any) => a.artistName.toLowerCase().includes(artistName.toLowerCase()))
+          .sort((a: any, b: any) => new Date(b.releaseDate).getTime() - new Date(a.releaseDate).getTime());
+
+        const uniqueAlbums: any[] = [];
+        const seen = new Set();
+        for (const item of sortedAlbums) {
+          const norm = item.collectionName.toLowerCase().trim();
+          if (!seen.has(norm)) {
+            seen.add(norm);
+            uniqueAlbums.push(item);
+          }
+        }
+
+        let albums = uniqueAlbums.map((a: any) => {
+          let type = "Album";
+          const lowerName = a.collectionName.toLowerCase();
+          if (lowerName.includes(" - ep")) type = "EP";
+          if (lowerName.includes(" - single")) type = "Single";
+          if (lowerName.includes("greatest hits") || lowerName.includes("compilation")) type = "Compilation";
+
+          const lowerColName = a.collectionName.toLowerCase().trim();
+          let keyTracks = songsByAlbum[a.collectionName];
+          if (!keyTracks) {
+            // Fuzzy match: find first key in songsByAlbum that is a substring or close match
+            const matchedKey = Object.keys(songsByAlbum).find(k => 
+              lowerColName.includes(k.toLowerCase()) || k.toLowerCase().includes(lowerColName)
+            );
+            if (matchedKey) {
+              keyTracks = songsByAlbum[matchedKey];
+            }
+          }
+
+          return {
+            title: a.collectionName,
+            year: a.releaseDate ? a.releaseDate.substring(0, 4) : "Unknown",
+            type,
+            imageUrl: a.artworkUrl100 ? a.artworkUrl100.replace('100x100bb', '300x300bb') : undefined,
+            keyTracks: keyTracks || [],
+            synopsis: `${a.primaryGenreName} release featuring ${a.trackCount || '?'} tracks.`,
+            spotifyUrl: a.collectionViewUrl
+          };
+        }).filter((a: any) => a.type !== "Single");
+
+        // SUPPLEMENT WITH LASTFM IF AVAILABLE
+        const lastfmKey = process.env.LASTFM_API_KEY;
+        if (lastfmKey) {
+            try {
+                const lfmRes = await fetch(`http://ws.audioscrobbler.com/2.0/?method=artist.gettopalbums&artist=${encodeURIComponent(artistName)}&api_key=${lastfmKey}&format=json&limit=30`);
+                if (lfmRes.ok) {
+                    const lfmData = await lfmRes.json();
+                    if (lfmData.topalbums && lfmData.topalbums.album) {
+                        for (const lAlbum of lfmData.topalbums.album) {
+                            const lLower = lAlbum.name ? lAlbum.name.toLowerCase() : "";
+                            // Skip known single releases or names with Single/EP/Re-edit
+                            if (
+                                lLower.includes(" - single") || 
+                                lLower.includes("(single)") ||
+                                lLower.includes("black sheep") ||
+                                lLower.includes("help i'm alive") ||
+                                lLower.includes("all comes crashing - single") ||
+                                lLower.includes("brie larson") ||
+                                lLower.includes("(remix)") ||
+                                lLower.includes(" - ep") ||
+                                lLower.includes("static anonymity") ||
+                                lLower.substring(0, 5) === "remix"
+                            ) {
+                                continue;
+                            }
+
+                            const match = albums.find((a: any) => 
+                                a.title.toLowerCase() === lAlbum.name.toLowerCase() ||
+                                a.title.toLowerCase().includes(lAlbum.name.toLowerCase()) || 
+                                lAlbum.name.toLowerCase().includes(a.title.toLowerCase())
+                            );
+                            // Avoid adding duplicates or tracks incorrectly flagged as albums
+                            if (!match && lAlbum.name && lAlbum.name.toLowerCase() !== '(null)') {
+                                const lfmInfo = await fetch(`http://ws.audioscrobbler.com/2.0/?method=album.getinfo&artist=${encodeURIComponent(artistName)}&album=${encodeURIComponent(lAlbum.name)}&api_key=${lastfmKey}&format=json`);
+                                if (lfmInfo.ok) {
+                                    const infoData = await lfmInfo.json();
+                                    if (infoData.album) {
+                                        let year = "Unknown";
+                                        if (infoData.album.wiki && infoData.album.wiki.published) {
+                                            const matchYear = infoData.album.wiki.published.match(/\d{4}/);
+                                            if (matchYear) year = matchYear[0];
+                                        }
+                                        let keyTracks: string[] = [];
+                                        if (infoData.album.tracks && infoData.album.tracks.track) {
+                                            const tArray = Array.isArray(infoData.album.tracks.track) ? infoData.album.tracks.track : [infoData.album.tracks.track];
+                                            keyTracks = tArray.slice(0, 3).map((t: any) => t.name);
+                                        }
+                                        let imageUrl = undefined;
+                                        if (infoData.album.image) {
+                                            const img = infoData.album.image.find((i: any) => i.size === "extralarge" || i.size === "large");
+                                            if (img) imageUrl = img["#text"];
+                                        }
+                                        let defaultSynopsis = "Alternative release.";
+                                        if (infoData.album.wiki && infoData.album.wiki.summary) {
+                                            let cleanText = infoData.album.wiki.summary.replace(/<[^>]+>/g, '').trim();
+                                            if (cleanText) defaultSynopsis = cleanText.substring(0, 150) + (cleanText.length > 150 ? "..." : "");
+                                        }
+
+                                        albums.push({
+                                            title: infoData.album.name || lAlbum.name,
+                                            year,
+                                            type: "Album",
+                                            imageUrl: imageUrl || undefined,
+                                            keyTracks,
+                                            synopsis: defaultSynopsis,
+                                            spotifyUrl: lAlbum.url
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn("LastFM Supplemnt failed", err);
+            }
+        }
+
+        // Re-sort chronologically (newest first)
+        albums = albums.sort((a, b) => {
+            const yA = parseInt(a.year) || 0;
+            const yB = parseInt(b.year) || 0;
+            return yB - yA;
+        });
+
+        const data = { artist: artistName, albums };
+        discographyCache.set(cacheKeyRaw, data);
+        if (redis) {
+          try {
+            await redis.setex(cacheKey, 2592000, JSON.stringify(data));
+            console.log(`[REDIS CACHE SET SUCCESS (ITUNES)] ${cacheKey}`);
+          } catch(e) { console.warn("[REDIS CACHE SET FAIL]", e); }
+        }
+        return res.json(data);
+      }
+    } catch (itunesErr) {
+      console.warn("[ITUNES API ERROR]", itunesErr);
+    }
+
     if (!ai) {
       console.warn("[GEMINI KEY MISSING] Running deterministic simulated discography.");
       const fallback = generateFallbackDiscography(artistName);
@@ -1429,11 +1618,11 @@ Output strictly formatted JSON matching the requested schema.`;
 
     try {
       const prompt = `Formulate a beautifully curated musicological discography of the artist "${artistName}".
-Provide up to 20 of their most important official releases, chronologically ordered to cover their career milestones (including albums, EPs, or singles).
+Provide up to 20 of their most important official releases, chronologically ordered to cover their career milestones (including albums, EPs, or compilations, but completely excluding singles).
 For each release, include:
 - The exact title
 - The release year (e.g. "2006")
-- The release group type ("Album", "EP", "Single", "Compilation")
+- The release group type ("Album", "EP", "Compilation")
 - Exactly 3 breakout tracks or top key tracks representing the record's sound
 - A highly descriptive, atmospheric 1-2 sentence musical synopsis describing its specific sonic textures, aesthetic mood, and historical significance.
 Output strictly formatted JSON matching the requested schema.`;
@@ -1455,6 +1644,9 @@ Output strictly formatted JSON matching the requested schema.`;
       }
 
       const data = JSON.parse(response.text.trim());
+      if (data && Array.isArray(data.albums)) {
+        data.albums = data.albums.filter((a: any) => a.type !== "Single");
+      }
       discographyCache.set(cacheKeyRaw, data);
       if (redis) {
         try {

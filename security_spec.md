@@ -1,4 +1,4 @@
-# Security Spec for Sonic DNA Console
+# Security Spec for BeatBrowser Console
 
 ## 1. Data Invariants
 
