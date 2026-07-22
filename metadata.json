@@ -1,6 +1,6 @@
 {
   "name": "BeatBrowser",
-  "description": "Explore deep musicological connections and dynamic 2D playback vectors with server-side Gemini. Instantly search any artist or track, and upload your official streaming history.",
+  "description": "Explore artist and tracks using an interactive 2D song DNA tool powered by Gemini, using user inputs, or streaming history uploads",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

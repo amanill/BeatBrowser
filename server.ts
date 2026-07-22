@@ -195,6 +195,7 @@ const apiLimiter = rateLimit({
 
 async function startServer() {
   const app = express();
+  app.set("trust proxy", 1); // Trust first proxy for express-rate-limit on Cloud Run
   const PORT = 3000;
 
   function getProceduralTrackExplanation(
@@ -1621,7 +1622,7 @@ Output strictly formatted JSON matching the requested schema.`;
 Provide up to 20 of their most important official releases, chronologically ordered to cover their career milestones (including albums, EPs, or compilations, but completely excluding singles).
 For each release, include:
 - The exact title
-- The release year (e.g. "2006")
+- The release year (e.g. "2006"). CRITICAL: You MUST use the original release year of the album. Do not use the year of a remaster, deluxe edition, or anniversary release.
 - The release group type ("Album", "EP", "Compilation")
 - Exactly 3 breakout tracks or top key tracks representing the record's sound
 - A highly descriptive, atmospheric 1-2 sentence musical synopsis describing its specific sonic textures, aesthetic mood, and historical significance.

@@ -195,8 +195,8 @@ export default function App() {
   const constellationCanvasRef = useRef<HTMLDivElement | null>(null);
   const [isMapExpanded, setIsMapExpanded] = useState(false);
   const [mapEngine, setMapEngine] = useState<"gemini" | "spotify">("gemini");
-  const [constellationSizeAI, setConstellationSizeAI] = useState<number>(20);
-  const [constellationSizeAPI, setConstellationSizeAPI] = useState<number>(20);
+  const [constellationSizeAI, setConstellationSizeAI] = useState<number>(50);
+  const [constellationSizeAPI, setConstellationSizeAPI] = useState<number>(50);
   const constellationSize = mapEngine === "gemini" ? constellationSizeAI : constellationSizeAPI;
 
   // Artist Map & Fullscreen states
@@ -1157,14 +1157,27 @@ export default function App() {
           return null;
         });
 
-      const itunesPromise = fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchQuery)}&limit=15&media=music`)
+      // Query standard songs and release items
+      const itunesSongsPromise = fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchQuery)}&limit=15&media=music`)
         .then(res => res.ok ? res.json() : null)
         .catch(err => {
-          console.warn("[ITUNES AUTOCOMPLETE SEARCH FALLBACK] Failed to reach iTunes:", err);
+          console.warn("[ITUNES SONG SEARCH FALLBACK] Failed to reach iTunes:", err);
           return null;
         });
 
-      const [lastfmData, iTunesData] = await Promise.all([lastfmPromise, itunesPromise]);
+      // Query artists specifically so we have full unified support for direct artist discovery
+      const itunesArtistsPromise = fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchQuery)}&limit=10&media=music&entity=musicArtist`)
+        .then(res => res.ok ? res.json() : null)
+        .catch(err => {
+          console.warn("[ITUNES ARTIST SEARCH FALLBACK] Failed to reach iTunes:", err);
+          return null;
+        });
+
+      const [lastfmData, iTunesSongsData, iTunesArtistsData] = await Promise.all([
+        lastfmPromise,
+        itunesSongsPromise,
+        itunesArtistsPromise
+      ]);
 
       if (lastfmData) {
         const lTracks = lastfmData.tracks || [];
@@ -1219,9 +1232,15 @@ export default function App() {
         lastfmResults = [...lastfmTracksMapped, ...lastfmArtistsMapped];
       }
 
-      if (iTunesData && iTunesData.results && Array.isArray(iTunesData.results)) {
-        iTunesResults = iTunesData.results.map((item: any, idx: number) => {
-          const isArtist = item.wrapperType === "artist" || item.kind === "music-artist";
+      // Merge both iTunes artists and tracks/songs results
+      const itunesCombinedResults = [
+        ...(iTunesArtistsData?.results || []),
+        ...(iTunesSongsData?.results || [])
+      ];
+
+      if (itunesCombinedResults.length > 0) {
+        iTunesResults = itunesCombinedResults.map((item: any, idx: number) => {
+          const isArtist = item.wrapperType === "artist" || item.artistType === "Artist" || item.kind === "music-artist";
           return {
             id: String(item.trackId || item.artistId || `itunes_${idx}_${Math.random()}`),
             name: item.trackName || item.artistName || "Unknown Music",
@@ -1256,7 +1275,7 @@ export default function App() {
       const seenIds = new Set<string>();
       
       for (const tr of merged) {
-        // Dedup by lowercase track name and artist name combination
+        // Dedup by lowercase track/artist name combination
         const matchKey = `${tr.name.toLowerCase()}--${tr.artists[0]?.name.toLowerCase()}`;
         if (!seenIds.has(matchKey)) {
           seenIds.add(matchKey);
@@ -1285,7 +1304,35 @@ export default function App() {
         ]);
         setIsTracklistLoading(false);
       } else {
-        const topResults = finalMerged.slice(0, 20);
+        // Partition and sort the final duplicate-free list:
+        // 1. Direct spelling matching Artists
+        // 2. Music/Song Tracks
+        // 3. Other/Non-matching Artists
+        const qClean = searchQuery.toLowerCase().trim();
+        const directArtistMatches: SpotifyTrack[] = [];
+        const songMatches: SpotifyTrack[] = [];
+        const otherArtistMatches: SpotifyTrack[] = [];
+
+        for (const track of finalMerged) {
+          const isArtist = track.album?.name === "Artist Profile" || track.uri?.includes(":artist:");
+          if (isArtist) {
+            if (track.name.toLowerCase().trim() === qClean) {
+              directArtistMatches.push(track);
+            } else {
+              otherArtistMatches.push(track);
+            }
+          } else {
+            songMatches.push(track);
+          }
+        }
+
+        const sortedResults = [
+          ...directArtistMatches,
+          ...songMatches,
+          ...otherArtistMatches
+        ];
+
+        const topResults = sortedResults.slice(0, 20);
         setSearchResults(topResults);
         setIsTracklistLoading(false);
 
@@ -1297,28 +1344,44 @@ export default function App() {
           if (isPlaceholder) {
             try {
               const isArtist = track.album?.name === "Artist Profile" || track.uri?.includes(":artist:");
-              const searchQueryTerm = isArtist 
-                ? track.name 
-                : `${track.name} ${track.artists?.[0]?.name || ""}`;
               
-              const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchQueryTerm.trim())}&limit=1&media=music`);
-              if (res.ok) {
-                const data = await res.json();
-                if (data.results && data.results.length > 0) {
-                  const artwork = data.results[0].artworkUrl100?.replace("100x100bb", "200x200bb");
-                  if (artwork) {
+              if (isArtist) {
+                // Fetch high-fidelity artist photo via local server-side Deezer proxy route
+                const res = await fetch(`/api/artist/image?artist=${encodeURIComponent(track.name)}`);
+                if (res.ok) {
+                  const data = await res.json();
+                  if (data && data.imageUrl) {
                     return {
                       ...track,
                       album: {
                         ...track.album,
-                        images: [{ url: artwork, height: 200, width: 200 }]
+                        images: [{ url: data.imageUrl, height: 200, width: 200 }]
                       }
                     };
                   }
                 }
+              } else {
+                // Fetch track image via iTunes search
+                const searchQueryTerm = `${track.name} ${track.artists?.[0]?.name || ""}`;
+                const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(searchQueryTerm.trim())}&limit=1&media=music`);
+                if (res.ok) {
+                  const data = await res.json();
+                  if (data.results && data.results.length > 0) {
+                    const artwork = data.results[0].artworkUrl100?.replace("100x100bb", "200x200bb");
+                    if (artwork) {
+                      return {
+                        ...track,
+                        album: {
+                          ...track.album,
+                          images: [{ url: artwork, height: 200, width: 200 }]
+                        }
+                      };
+                    }
+                  }
+                }
               }
             } catch (err) {
-              console.warn("[ITUNES SEARCH RESULT ENRICHMENT FAIL]:", err);
+              console.warn("[ITUNES/PROXY SEARCH RESULT ENRICHMENT FAIL]:", err);
             }
           }
           return track;
