@@ -187,16 +187,18 @@ const discographySchema = {
 // Rate limiting setup
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // Limit each IP to 200 requests per windowMs
+  max: 3000, // Allow generous limit for batch star/image/metadata queries on 50-star maps
   standardHeaders: true,
   legacyHeaders: false,
+  validate: false, // Prevent express-rate-limit ERL_FORWARDED_HEADER validation errors on Cloud Run proxies
   message: { error: "Too many requests, please try again later." }
 });
 
-async function startServer() {
-  const app = express();
-  app.set("trust proxy", 1); // Trust first proxy for express-rate-limit on Cloud Run
-  const PORT = 3000;
+export const app = express();
+
+export async function startServer(isTest = false) {
+  app.set("trust proxy", true); // Trust GCP / Cloud Run proxies for req.ip resolution
+  const PORT = process.env.PORT || 3000;
 
   function getProceduralTrackExplanation(
     centralTrack: string, 
@@ -278,8 +280,15 @@ async function startServer() {
     }
   }
 
-  // DevOps best practice: Gzip compression of both static web assets and dynamic API payloads
-  app.use(compression());
+  // DevOps best practice: Gzip compression of both static web assets and dynamic API payloads (excluding Event Streams)
+  app.use(compression({
+    filter: (req, res) => {
+      if (req.headers['accept'] === 'text/event-stream' || res.getHeader('Content-Type')?.toString().includes('text/event-stream')) {
+        return false;
+      }
+      return compression.filter(req, res);
+    }
+  }));
   app.use(express.json());
 
   // Security best practice: Disable powered-by header and configure loose CSP to prevent breaking iframes
@@ -1022,7 +1031,7 @@ Output strictly formatted JSON matching the requested schema.`;
 
       const response = await callGeminiWithRetry(() => 
         ai.models.generateContent({
-          model: "gemini-3.5-flash",
+          model: "gemini-3.6-flash",
           contents: prompt,
           config: {
             responseMimeType: "application/json",
@@ -1112,7 +1121,7 @@ Output strictly formatted JSON matching the requested schema.`;
 
       const response = await callGeminiWithRetry(() =>
         ai.models.generateContent({
-          model: "gemini-3.5-flash",
+          model: "gemini-3.6-flash",
           contents: prompt,
           config: {
             responseMimeType: "application/json",
@@ -1153,9 +1162,16 @@ Output strictly formatted JSON matching the requested schema.`;
   
   app.post("/api/gemini/explain-track-stream", async (req, res) => {
     const { trackName, artistName, similarTracks } = req.body;
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    if (typeof (res as any).flushHeaders === "function") (res as any).flushHeaders();
+
+    const writeStreamChunk = (data: string) => {
+      res.write(data);
+      if (typeof (res as any).flush === "function") (res as any).flush();
+    };
 
     const cacheKey = `ai:map:explain:track:${artistName.trim().toLowerCase()}:${trackName.trim().toLowerCase()}`;
     if (redis) {
@@ -1166,7 +1182,7 @@ Output strictly formatted JSON matching the requested schema.`;
           const words = cached.split(" ");
           for (let i = 0; i < words.length; i += 3) {
             const chunk = words.slice(i, i + 3).join(" ") + " ";
-            res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
+            writeStreamChunk(`data: ${JSON.stringify({ text: chunk })}\n\n`);
             await new Promise(resolve => setTimeout(resolve, 35));
           }
           res.end();
@@ -1179,16 +1195,16 @@ Output strictly formatted JSON matching the requested schema.`;
 
     if (!ai) {
       await streamLocalTrackExplanation(trackName, artistName, similarTracks || [], (chunkText) => {
-        res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+        writeStreamChunk(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
       });
       return res.end();
     }
 
-    const prompt = `As a musicologist, explain the stylistic and contextual connections between "${trackName}" by ${artistName} and the following similar tracks identified by Last.fm: ${similarTracks.join(", ")}. Keep the analysis engaging, insightful, and around 3 paragraphs.`;
+    const prompt = `As a musicologist, explain the stylistic and contextual connections between "${trackName}" by ${artistName} and the following similar tracks identified by Last.fm: ${(similarTracks || []).join(", ")}. Keep the analysis engaging, insightful, and around 3 paragraphs.`;
 
     try {
       const responseStream = await ai.models.generateContentStream({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.6-flash",
         contents: prompt
       });
 
@@ -1196,7 +1212,7 @@ Output strictly formatted JSON matching the requested schema.`;
       for await (const chunk of responseStream) {
         if (chunk.text) {
           fullText += chunk.text;
-          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+          writeStreamChunk(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
         }
       }
       res.end();
@@ -1205,10 +1221,10 @@ Output strictly formatted JSON matching the requested schema.`;
              console.log(`[REDIS CACHE SET SUCCESS] ${cacheKey}`); } catch(e) {}
       }
     } catch(err) {
-      console.warn("[GEMINI STREAM WARN] gemini-3.5-flash failed, attempting gemini-3.1-flash-lite fallback. Error:", err.message || err);
+      console.warn("[GEMINI STREAM WARN] gemini-3.6-flash failed, attempting gemini-2.5-flash fallback. Error:", err.message || err);
       try {
         const responseStream = await ai.models.generateContentStream({
-          model: "gemini-3.1-flash-lite",
+          model: "gemini-2.5-flash",
           contents: prompt
         });
         
@@ -1216,7 +1232,7 @@ Output strictly formatted JSON matching the requested schema.`;
         for await (const chunk of responseStream) {
           if (chunk.text) {
             fullText += chunk.text;
-            res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+            writeStreamChunk(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
           }
         }
         res.end();
@@ -1225,9 +1241,9 @@ Output strictly formatted JSON matching the requested schema.`;
              console.log(`[REDIS CACHE SET SUCCESS] ${cacheKey}`); } catch(e) {}
         }
       } catch(err2) {
-        console.error("[GEMINI STREAM ERROR] gemini-3.1-flash-lite also failed. Running high-fidelity local streaming fallback. Error:", err2.message || err2);
+        console.error("[GEMINI STREAM ERROR] gemini-2.5-flash also failed. Running high-fidelity local streaming fallback. Error:", err2.message || err2);
         await streamLocalTrackExplanation(trackName, artistName, similarTracks || [], (chunkText) => {
-          res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+          writeStreamChunk(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
         });
         res.end();
       }
@@ -1236,9 +1252,16 @@ Output strictly formatted JSON matching the requested schema.`;
 
   app.post("/api/gemini/explain-artist-stream", async (req, res) => {
     const { artistName, similarArtists } = req.body;
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    if (typeof (res as any).flushHeaders === "function") (res as any).flushHeaders();
+
+    const writeStreamChunk = (data: string) => {
+      res.write(data);
+      if (typeof (res as any).flush === "function") (res as any).flush();
+    };
 
     const cacheKey = `ai:map:explain:artist:${artistName.trim().toLowerCase()}`;
     if (redis) {
@@ -1249,7 +1272,7 @@ Output strictly formatted JSON matching the requested schema.`;
           const words = cached.split(" ");
           for (let i = 0; i < words.length; i += 3) {
             const chunk = words.slice(i, i + 3).join(" ") + " ";
-            res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
+            writeStreamChunk(`data: ${JSON.stringify({ text: chunk })}\n\n`);
             await new Promise(resolve => setTimeout(resolve, 35));
           }
           res.end();
@@ -1262,16 +1285,16 @@ Output strictly formatted JSON matching the requested schema.`;
 
     if (!ai) {
       await streamLocalArtistExplanation(artistName, similarArtists || [], (chunkText) => {
-        res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+        writeStreamChunk(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
       });
       return res.end();
     }
 
-    const prompt = `As a musicologist, explain the stylistic, historical, and contextual connections between the artist "${artistName}" and the following similar artists identified by Last.fm: ${similarArtists.join(", ")}. Keep the analysis engaging, insightful, and around 3 paragraphs.`;
+    const prompt = `As a musicologist, explain the stylistic, historical, and contextual connections between the artist "${artistName}" and the following similar artists identified by Last.fm: ${(similarArtists || []).join(", ")}. Keep the analysis engaging, insightful, and around 3 paragraphs.`;
 
     try {
       const responseStream = await ai.models.generateContentStream({
-        model: "gemini-3.5-flash",
+        model: "gemini-3.6-flash",
         contents: prompt
       });
 
@@ -1279,7 +1302,7 @@ Output strictly formatted JSON matching the requested schema.`;
       for await (const chunk of responseStream) {
         if (chunk.text) {
           fullText += chunk.text;
-          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+          writeStreamChunk(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
         }
       }
       res.end();
@@ -1288,10 +1311,10 @@ Output strictly formatted JSON matching the requested schema.`;
              console.log(`[REDIS CACHE SET SUCCESS] ${cacheKey}`); } catch(e) {}
       }
     } catch(err) {
-      console.warn("[GEMINI STREAM WARN] gemini-3.5-flash failed, attempting gemini-3.1-flash-lite fallback. Error:", err.message || err);
+      console.warn("[GEMINI STREAM WARN] gemini-3.6-flash failed, attempting gemini-2.5-flash fallback. Error:", err.message || err);
       try {
         const responseStream = await ai.models.generateContentStream({
-          model: "gemini-3.1-flash-lite",
+          model: "gemini-2.5-flash",
           contents: prompt
         });
         
@@ -1299,7 +1322,7 @@ Output strictly formatted JSON matching the requested schema.`;
         for await (const chunk of responseStream) {
           if (chunk.text) {
             fullText += chunk.text;
-            res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+            writeStreamChunk(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
           }
         }
         res.end();
@@ -1308,9 +1331,9 @@ Output strictly formatted JSON matching the requested schema.`;
              console.log(`[REDIS CACHE SET SUCCESS] ${cacheKey}`); } catch(e) {}
         }
       } catch(err2) {
-        console.error("[GEMINI STREAM ERROR] gemini-3.1-flash-lite also failed. Running high-fidelity local streaming fallback. Error:", err2.message || err2);
+        console.error("[GEMINI STREAM ERROR] gemini-2.5-flash also failed. Running high-fidelity local streaming fallback. Error:", err2.message || err2);
         await streamLocalArtistExplanation(artistName, similarArtists || [], (chunkText) => {
-          res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+          writeStreamChunk(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
         });
         res.end();
       }
@@ -1369,7 +1392,7 @@ Output strictly formatted JSON matching the requested schema.`;
 
       const response = await callGeminiWithRetry(() =>
         ai.models.generateContent({
-          model: "gemini-3.5-flash",
+          model: "gemini-3.6-flash",
           contents: prompt,
           config: {
             responseMimeType: "application/json",
@@ -1630,7 +1653,7 @@ Output strictly formatted JSON matching the requested schema.`;
 
       const response = await callGeminiWithRetry(() =>
         ai.models.generateContent({
-          model: "gemini-3.5-flash",
+          model: "gemini-3.6-flash",
           contents: prompt,
           config: {
             responseMimeType: "application/json",
@@ -1671,7 +1694,7 @@ Output strictly formatted JSON matching the requested schema.`;
   });
 
   // Serve Vite in dev mode, Static Assets in production
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" && !isTest) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1691,30 +1714,35 @@ Output strictly formatted JSON matching the requested schema.`;
     res.status(500).json({ error: "Internal Server Error" });
   });
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server starting securely on http://localhost:${PORT} [Node: Spotify/Firebase decoupled build]`);
-  });
-
-  // Graceful shutdown handling
-  const shutdown = () => {
-    console.log("Shutting down server gracefully...");
-    server.close(() => {
-      console.log("Closed out remaining connections.");
-      process.exit(0);
+  if (!isTest) {
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server starting securely on http://localhost:${PORT} [Node: Spotify/Firebase decoupled build]`);
     });
-    
-    // Fallback if connections don't close
-    setTimeout(() => {
-      console.error("Could not close connections in time, forcefully shutting down");
-      process.exit(1);
-    }, 10000);
-  };
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+    // Graceful shutdown handling
+    const shutdown = () => {
+      console.log("Shutting down server gracefully...");
+      server.close(() => {
+        console.log("Closed out remaining connections.");
+        process.exit(0);
+      });
+      
+      // Fallback if connections don't close
+      setTimeout(() => {
+        console.error("Could not close connections in time, forcefully shutting down");
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", shutdown);
+  }
 }
 
-startServer();
+const isTestingEnv = process.env.NODE_ENV === "test" || process.env.JEST_WORKER_ID !== undefined;
+if (!isTestingEnv) {
+  startServer();
+}
 
 async function streamLocalTrackExplanation(
   trackName: string,

@@ -1679,16 +1679,20 @@ export default function App() {
         const reader = streamRes.body.getReader();
         const decoder = new TextDecoder();
         let fullDescription = "";
+        let buffer = "";
         
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          const messages = chunk.split('\\n\\n');
-          for (const msg of messages) {
-             if (msg.startsWith('data: ')) {
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+             const trimmed = line.trim();
+             if (trimmed.startsWith('data: ')) {
                try {
-                 const json = JSON.parse(msg.replace('data: ', ''));
+                 const json = JSON.parse(trimmed.slice(6));
                  if (json.text) {
                    fullDescription += json.text;
                    setArtistDNA(prev => prev ? ({ ...prev, description: fullDescription }) : prev);
@@ -1696,6 +1700,20 @@ export default function App() {
                } catch(e){}
              }
           }
+        }
+        if (buffer.trim().startsWith('data: ')) {
+          try {
+            const json = JSON.parse(buffer.trim().slice(6));
+            if (json.text) {
+              fullDescription += json.text;
+              setArtistDNA(prev => prev ? ({ ...prev, description: fullDescription }) : prev);
+            }
+          } catch(e){}
+        }
+
+        if (!fullDescription || fullDescription.trim() === "") {
+          const fallbackDesc = `Analysis of ${artistName}'s core musical identity across the constellation map. ${artistName} shares deep harmonic resonance and stylistic overlap with artists like ${(similarArtists || []).slice(0, 3).map((a: any) => a.name || a).join(", ") || "neighboring creators"}.`;
+          setArtistDNA(prev => prev ? ({ ...prev, description: fallbackDesc }) : prev);
         }
       }
 
@@ -2182,16 +2200,20 @@ export default function App() {
         const reader = streamRes.body.getReader();
         const decoder = new TextDecoder();
         let fullDescription = "";
+        let buffer = "";
         
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          const messages = chunk.split('\\n\\n');
-          for (const msg of messages) {
-             if (msg.startsWith('data: ')) {
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+             const trimmed = line.trim();
+             if (trimmed.startsWith('data: ')) {
                try {
-                 const json = JSON.parse(msg.replace('data: ', ''));
+                 const json = JSON.parse(trimmed.slice(6));
                  if (json.text) {
                    fullDescription += json.text;
                    setSongDNA(prev => prev ? ({ ...prev, description: fullDescription }) : prev);
@@ -2199,6 +2221,20 @@ export default function App() {
                } catch(e){}
              }
           }
+        }
+        if (buffer.trim().startsWith('data: ')) {
+          try {
+            const json = JSON.parse(buffer.trim().slice(6));
+            if (json.text) {
+              fullDescription += json.text;
+              setSongDNA(prev => prev ? ({ ...prev, description: fullDescription }) : prev);
+            }
+          } catch(e){}
+        }
+
+        if (!fullDescription || fullDescription.trim() === "") {
+          const fallbackDesc = `Analysis of "${track.name}" by ${track.artists[0]?.name || "Unknown Artist"}. This track occupies a distinct sonic coordinate on the constellation map, sharing rhythm, frequency response, and arrangement characteristics with nearby tracks like ${(similarTracks || []).slice(0, 3).map((t: any) => `"${t.title || t.name}"`).join(", ") || "peer songs"}.`;
+          setSongDNA(prev => prev ? ({ ...prev, description: fallbackDesc }) : prev);
         }
       }
 
